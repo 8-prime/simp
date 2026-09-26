@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use eyre::eyre;
+use bitcode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 pub struct Footer {
@@ -75,6 +75,88 @@ impl SimpConfig {
                 );
             }
         }
+        Ok(())
+    }
+}
+
+#[derive(Encode, Decode, PartialEq, Debug)]
+pub struct ManifestEntry {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+impl ManifestEntry {
+    pub async fn new(component_path: &PathBuf) -> eyre::Result<Self> {
+        let Some(file_name) = component_path.file_name() else {
+            eyre::bail!("Cannot determine file name for path {:#?}", component_path);
+        };
+        let name = file_name
+            .to_str()
+            .ok_or_else(|| eyre::eyre!("File name is not valid UTF-8"))?
+            .to_owned();
+        let bytes: Vec<u8> = tokio::fs::read(&component_path).await?;
+        return Ok(ManifestEntry {
+            name: name,
+            data: bytes,
+        });
+    }
+}
+
+#[derive(Encode, Decode, PartialEq, Debug)]
+pub struct Manifest {
+    pub entries: Vec<ManifestEntry>,
+}
+
+impl Manifest {
+    pub async fn new(config: &SimpConfig) -> eyre::Result<Self> {
+        let mut manifest = Manifest { entries: vec![] };
+        for comp in config.components.iter() {
+            Manifest::handle_component(comp, &mut manifest).await?;
+        }
+        return Ok(manifest);
+    }
+
+    async fn handle_component(
+        component: &InstallComponent,
+        manifest: &mut Manifest,
+    ) -> eyre::Result<()> {
+        let path = &component.component_path;
+        if path.is_file() {
+            manifest
+                .entries
+                .push(ManifestEntry::new(&component.component_path).await?);
+        } else if path.is_dir() {
+            Manifest::handle_dir_component(&component.component_path, manifest).await?;
+        } else {
+            eyre::bail!(
+                "Required component at path {:#?} does not exist",
+                component.component_path
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_dir_component(
+        component_path: &PathBuf,
+        manifest: &mut Manifest,
+    ) -> eyre::Result<()> {
+        let mut pending = vec![component_path.clone()];
+
+        while let Some(dir) = pending.pop() {
+            let mut entries = tokio::fs::read_dir(&dir).await?;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let kind = entry.file_type().await?;
+
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if kind.is_file() {
+                    manifest.entries.push(ManifestEntry::new(&path).await?);
+                }
+            }
+        }
+
         Ok(())
     }
 }

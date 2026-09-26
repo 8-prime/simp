@@ -1,7 +1,11 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self},
+    path::PathBuf,
+};
 
 use clap::Parser;
 use simp_core::SimpConfig;
+use tokio::{fs::File, io::AsyncWriteExt};
 
 const INSTALLER_EXE: &[u8] = include_bytes!("../../target/release/simp-installer.exe");
 
@@ -20,7 +24,8 @@ pub fn build_installer_name(config: &SimpConfig) -> String {
     format!("{}-{}-installer.exe", config.name, config.version)
 }
 
-fn main() -> eyre::Result<()> {
+#[tokio::main]
+async fn main() -> eyre::Result<()> {
     let args = Args::parse();
 
     if !args.input.exists() {
@@ -57,6 +62,9 @@ fn main() -> eyre::Result<()> {
             path
         }
     };
+
+    let mut file = File::create(output).await?;
+    file.write_all(INSTALLER_EXE).await?;
 
     // parse args
     // input path to simp.json
