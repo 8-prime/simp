@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::Parser;
-use simp_core::SimpConfig;
+use simp_core::{Footer, Manifest, SimpConfig};
 use tokio::{fs::File, io::AsyncWriteExt};
 
 const INSTALLER_EXE: &[u8] = include_bytes!("../../target/release/simp-installer.exe");
@@ -65,12 +65,17 @@ async fn main() -> eyre::Result<()> {
 
     let mut file = File::create(output).await?;
     file.write_all(INSTALLER_EXE).await?;
+    let manifest = Manifest::new(&config).await?;
+    let encoded: Vec<u8> = manifest.encode();
+    file.write_all(&encoded).await?;
 
-    // parse args
-    // input path to simp.json
-    // optional output dir for final installer
+    let footer = Footer {
+        manifest_offset: u64::try_from(INSTALLER_EXE.len())?,
+        version: 1,
+    };
 
-    // combine installer exe with files specified in simp, together with simp.config
+    let footer_buf: [u8; 14] = footer.into();
+    file.write_all(footer_buf.as_ref()).await?;
 
     println!("{:?}", INSTALLER_EXE.len());
     Ok(())

@@ -116,6 +116,10 @@ impl Manifest {
         return Ok(manifest);
     }
 
+    pub fn encode(&self) -> Vec<u8> {
+        return bitcode::encode(self);
+    }
+
     async fn handle_component(
         component: &InstallComponent,
         manifest: &mut Manifest,
