@@ -1,0 +1,30 @@
+[config]
+default_to_workspace = false
+
+[tasks.build-installer]
+command = "cargo"
+args = ["build", "--release", "-p", "simp-installer"]
+
+[tasks.build-embedded-cli]
+dependencies = ["build-installer"]
+env = { SIMP_INSTALLER_EXE = "${CARGO_MAKE_WORKING_DIRECTORY}/target/release/simp-installer.exe" }
+command = "cargo"
+args = [
+    "build",
+    "--release",
+    "-p",
+    "simp-cli",
+    "--features",
+    "embedded-installer"
+]
+
+[tasks.run-embedded-cli]
+dependencies = ["build-installer"]
+env = { SIMP_INSTALLER_EXE = "${CARGO_MAKE_WORKING_DIRECTORY}/target/release/simp-installer.exe" }
+command = "cargo"
+args = [
+    "run",
+    "--release",
+    "-p",
+    "simp-cli"
+]
