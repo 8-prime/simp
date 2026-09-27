@@ -60,7 +60,7 @@ pub struct CoreConfig {
 pub enum InstallTarget {
     ProgramFiles,
     AppData,
-    Custom(PathBuf),
+    Custom(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -177,5 +177,35 @@ impl Manifest {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_with_custom_target_round_trips() {
+        let manifest = Manifest {
+            core_config: CoreConfig {
+                name: "Example".into(),
+                version: "1.0.0".into(),
+                description: None,
+                eula: None,
+                auto_start: None,
+                desktop_icon: None,
+                start_menu: None,
+                add_to_path: None,
+                target: InstallTarget::Custom("C:/Example".into()),
+            },
+            entries: vec![ManifestEntry {
+                name: "app.exe".into(),
+                data: vec![1, 2, 3],
+            }],
+        };
+
+        let encoded = manifest.encode();
+        let decoded: Manifest = bitcode::decode(&encoded).unwrap();
+        assert_eq!(decoded, manifest);
     }
 }

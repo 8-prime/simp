@@ -21,7 +21,10 @@ pub struct Args {
 }
 
 pub fn build_installer_name(config: &SimpConfig) -> String {
-    format!("{}-{}-installer.exe", config.name, config.version)
+    format!(
+        "{}-{}-installer.exe",
+        config.core_config.name, config.core_config.version
+    )
 }
 
 #[tokio::main]
