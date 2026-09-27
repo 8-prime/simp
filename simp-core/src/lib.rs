@@ -43,9 +43,23 @@ impl TryFrom<&[u8]> for Footer {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Debug, Clone)]
+pub struct CoreConfig {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub eula: Option<String>,
+    pub auto_start: Option<bool>,
+    pub desktop_icon: Option<bool>,
+    pub start_menu: Option<bool>,
+    pub add_to_path: Option<bool>,
+    pub target: InstallTarget,
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Debug, Clone)]
 pub enum InstallTarget {
-    ProgramFiles(String),
+    ProgramFiles,
+    AppData,
     Custom(PathBuf),
 }
 
@@ -56,13 +70,8 @@ pub struct InstallComponent {
 
 #[derive(Serialize, Deserialize)]
 pub struct SimpConfig {
-    pub name: String,
-    pub version: String,
-    pub target: InstallTarget,
+    pub core_config: CoreConfig,
     pub components: Vec<InstallComponent>,
-    pub auto_start: bool,
-    pub desktop_icon: bool,
-    pub start_menu: bool,
 }
 
 impl SimpConfig {
@@ -104,15 +113,21 @@ impl ManifestEntry {
 
 #[derive(Encode, Decode, PartialEq, Debug)]
 pub struct Manifest {
+    pub core_config: CoreConfig,
     pub entries: Vec<ManifestEntry>,
 }
 
 impl Manifest {
     pub async fn new(config: &SimpConfig) -> eyre::Result<Self> {
-        let mut manifest = Manifest { entries: vec![] };
+        let mut manifest = Manifest {
+            core_config: config.core_config.clone(),
+            entries: vec![],
+        };
+
         for comp in config.components.iter() {
             Manifest::handle_component(comp, &mut manifest).await?;
         }
+
         return Ok(manifest);
     }
 
