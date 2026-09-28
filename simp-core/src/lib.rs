@@ -135,6 +135,10 @@ impl Manifest {
         return bitcode::encode(self);
     }
 
+    pub fn decode(bytes: &[u8]) -> eyre::Result<Self> {
+        Ok(bitcode::decode(bytes)?)
+    }
+
     async fn handle_component(
         component: &InstallComponent,
         manifest: &mut Manifest,

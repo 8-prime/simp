@@ -3,4 +3,13 @@ name = "simp-installer"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Fixture data and simulated progress are excluded from normal builds.
+ui-preview = []
+
 [dependencies]
+gpui-kit = "0.6.6"
+eyre = "0.6.14"
+simp-core = { path="../simp-core"}
+tokio = { version = "1.53.1", features = ["full"] }
