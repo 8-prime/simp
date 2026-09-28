@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use simp_core::Manifest;
 
-use crate::platform::initial_destination;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     Welcome,
@@ -70,7 +68,7 @@ impl AppDetails {
             version: config.version.clone(),
             description: config.description.clone().unwrap_or_default(),
             license: config.eula.clone().filter(|text| !text.trim().is_empty()),
-            destination: initial_destination(&config.target, &config.name),
+            destination: config.target.resolve(&config.name),
             required_bytes: manifest.entries.iter().fold(0_u64, |total, entry| {
                 total.saturating_add(entry.data.len() as u64)
             }),
