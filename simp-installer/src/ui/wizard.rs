@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use simp_core::Manifest;
 
+use crate::install::operation::{InstallOptions, InstallTask};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     Welcome,
@@ -46,6 +48,7 @@ impl InstallerState {
 }
 
 pub(super) struct OptionalTask {
+    pub kind: InstallTask,
     pub label: &'static str,
     pub selected: bool,
 }
@@ -73,16 +76,51 @@ impl AppDetails {
                 total.saturating_add(entry.data.len() as u64)
             }),
             tasks: [
-                ("Create a desktop shortcut", config.desktop_icon),
-                ("Create a Start Menu entry", config.start_menu),
-                ("Launch application on startup", config.auto_start),
-                ("Add application to the system PATH", config.add_to_path),
+                (
+                    InstallTask::DesktopShortcut,
+                    "Create a desktop shortcut",
+                    config.desktop_icon,
+                ),
+                (
+                    InstallTask::StartMenuEntry,
+                    "Create a Start Menu entry",
+                    config.start_menu,
+                ),
+                (
+                    InstallTask::Autostart,
+                    "Launch application on startup",
+                    config.auto_start,
+                ),
+                (
+                    InstallTask::AddToPath,
+                    "Add application to the system PATH",
+                    config.add_to_path,
+                ),
             ]
             .into_iter()
-            .filter_map(|(label, selected)| {
-                selected.map(|selected| OptionalTask { label, selected })
+            .filter_map(|(kind, label, selected)| {
+                selected.map(|selected| OptionalTask {
+                    kind,
+                    label,
+                    selected,
+                })
             })
             .collect(),
+        }
+    }
+
+    pub fn install_options(&self) -> InstallOptions {
+        let selected = |kind| {
+            self.tasks
+                .iter()
+                .any(|task| task.kind == kind && task.selected)
+        };
+        InstallOptions {
+            destination: self.destination.clone(),
+            desktop_shortcut: selected(InstallTask::DesktopShortcut),
+            start_menu_entry: selected(InstallTask::StartMenuEntry),
+            autostart: selected(InstallTask::Autostart),
+            add_to_path: selected(InstallTask::AddToPath),
         }
     }
 
@@ -190,5 +228,22 @@ mod tests {
         assert!(details.tasks[0].selected);
         assert!(!details.tasks[1].selected);
         assert_eq!(details.pages(), Page::ALL);
+    }
+
+    #[test]
+    fn install_options_use_current_selection_and_treat_absent_tasks_as_false() {
+        let mut details = AppDetails::from_manifest(&manifest());
+        let options = details.install_options();
+        assert_eq!(options.destination, details.destination);
+        assert!(options.desktop_shortcut);
+        assert!(!options.autostart);
+        assert!(!options.start_menu_entry);
+        assert!(!options.add_to_path);
+
+        details.tasks[0].selected = false;
+        details.tasks[1].selected = true;
+        let options = details.install_options();
+        assert!(!options.desktop_shortcut);
+        assert!(options.autostart);
     }
 }

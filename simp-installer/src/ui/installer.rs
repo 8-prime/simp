@@ -27,6 +27,7 @@ pub(super) struct InstallerView {
     pub focus: FocusHandle,
     pub state: InstallerState,
     pub details: Option<AppDetails>,
+    manifest: Option<Manifest>,
     destination_input: Entity<InputState>,
     license_accepted: bool,
     pub show_details: bool,
@@ -50,20 +51,26 @@ impl InstallerView {
     ) -> Self {
         #[cfg(feature = "ui-preview")]
         let mut preview_failure = None;
-        let (details, state) = match installer {
+        let (details, manifest, state) = match installer {
             #[cfg(feature = "ui-preview")]
             Ok((LaunchMode::Preview { fail }, manifest)) => {
                 preview_failure = Some(fail);
+                let details = AppDetails::from_manifest(&manifest);
                 (
-                    Some(AppDetails::from_manifest(&manifest)),
+                    Some(details),
+                    Some(manifest),
                     InstallerState::Choosing(Page::Welcome),
                 )
             }
-            Ok((LaunchMode::Runtime, manifest)) => (
-                Some(AppDetails::from_manifest(&manifest)),
-                InstallerState::Choosing(Page::Welcome),
-            ),
-            Err(message) => (None, InstallerState::Failed { message }),
+            Ok((LaunchMode::Runtime, manifest)) => {
+                let details = AppDetails::from_manifest(&manifest);
+                (
+                    Some(details),
+                    Some(manifest),
+                    InstallerState::Choosing(Page::Welcome),
+                )
+            }
+            Err(message) => (None, None, InstallerState::Failed { message }),
         };
         let destination = details
             .as_ref()
@@ -84,6 +91,7 @@ impl InstallerView {
             focus: cx.focus_handle(),
             state,
             details,
+            manifest,
             destination_input,
             license_accepted: false,
             show_details: true,
@@ -104,6 +112,17 @@ impl InstallerView {
         return self.preview_failure.is_some();
         #[cfg(not(feature = "ui-preview"))]
         false
+    }
+
+    fn start_install(&mut self, _cx: &mut Context<Self>) {
+        let (Some(_manifest), Some(details)) = (self.manifest.as_ref(), self.details.as_ref())
+        else {
+            return;
+        };
+        let _options = details.install_options();
+        todo!(
+            "run InstallOperation with the manifest and selected options on a worker, then forward InstallEvent values to the view"
+        )
     }
 
     fn name(&self) -> &str {
@@ -215,15 +234,18 @@ impl InstallerView {
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut content = div().flex().flex_col().gap_4();
         match &self.state {
-            InstallerState::Choosing(Page::Welcome) => content
-                .pt_2()
-                .child(
-                    self.details
-                        .as_ref()
-                        .map(|details| details.description.clone())
-                        .unwrap_or_default(),
-                )
-                .into_any_element(),
+            InstallerState::Choosing(Page::Welcome) => {
+                let mut content = content.pt_2();
+                if let Some(description) = self
+                    .details
+                    .as_ref()
+                    .map(|details| details.description.as_str())
+                    .filter(|description| !description.trim().is_empty())
+                {
+                    content = content.child(description.to_owned());
+                }
+                content.into_any_element()
+            }
             InstallerState::Choosing(Page::License) => {
                 let accepting_view = cx.entity().downgrade();
                 let declining_view = cx.entity().downgrade();
@@ -360,12 +382,6 @@ impl InstallerView {
                     .rounded(px(5.))
                     .bg(rgb(SURFACE));
                 if let Some(details) = &self.details {
-                    let tasks: Vec<_> = details
-                        .tasks
-                        .iter()
-                        .filter(|task| task.selected)
-                        .map(|task| task.label)
-                        .collect();
                     summary = summary
                         .child(summary_row(
                             "Application:",
@@ -374,8 +390,15 @@ impl InstallerView {
                         .child(summary_row(
                             "Install location:",
                             details.destination.display().to_string(),
-                        ))
-                        .child(summary_row(
+                        ));
+                    if !details.tasks.is_empty() {
+                        let tasks: Vec<_> = details
+                            .tasks
+                            .iter()
+                            .filter(|task| task.selected)
+                            .map(|task| task.label)
+                            .collect();
+                        summary = summary.child(summary_row(
                             "Additional tasks:",
                             if tasks.is_empty() {
                                 "None".into()
@@ -383,6 +406,7 @@ impl InstallerView {
                                 tasks.join("\n")
                             },
                         ));
+                    }
                 }
                 if !self.is_preview() {
                     content = content.child(
@@ -560,8 +584,12 @@ impl InstallerView {
                         .disabled(!enabled)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if ready {
-                                #[cfg(feature = "ui-preview")]
-                                this.start_preview(cx);
+                                if this.is_preview() {
+                                    #[cfg(feature = "ui-preview")]
+                                    this.start_preview(cx);
+                                } else {
+                                    this.start_install(cx);
+                                }
                                 window.focus(&this.focus, cx);
                             } else {
                                 this.navigate(true, window, cx);

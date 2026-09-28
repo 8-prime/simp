@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub mod operation;
+
 use simp_core::{Footer, Manifest};
 use tokio::fs::read;
 
