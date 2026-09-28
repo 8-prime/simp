@@ -543,7 +543,7 @@ impl InstallerView {
         match &self.state {
             InstallerState::Choosing(page) => {
                 if *page != Page::Welcome {
-                    buttons = buttons.child(secondary_button("back", "< Back").on_click(
+                    buttons = buttons.child(secondary_button("back", "‹ Back").on_click(
                         cx.listener(|this, _, window, cx| this.navigate(false, window, cx)),
                     ));
                 }
@@ -556,7 +556,7 @@ impl InstallerView {
                     }
                 });
                 buttons = buttons.child(
-                    primary_button("next", if ready { "Install" } else { "Next >" })
+                    primary_button("next", if ready { "Install" } else { "Next ›" })
                         .disabled(!enabled)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if ready {
@@ -571,8 +571,8 @@ impl InstallerView {
             }
             InstallerState::Installing { .. } => {
                 buttons = buttons
-                    .child(secondary_button("back", "< Back").disabled(true))
-                    .child(secondary_button("next", "Next >").disabled(true));
+                    .child(secondary_button("back", "‹ Back").disabled(true))
+                    .child(secondary_button("next", "Next ›").disabled(true));
             }
             InstallerState::Finished => {
                 return footer_row(
