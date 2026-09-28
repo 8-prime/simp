@@ -63,6 +63,22 @@ pub enum InstallTarget {
     Custom(String),
 }
 
+impl InstallTarget {
+    pub fn resolve(&self, app_name: &String) -> PathBuf {
+        match self {
+            InstallTarget::Custom(path) => PathBuf::from(path),
+            InstallTarget::ProgramFiles => std::env::var_os("ProgramFiles")
+                .map(PathBuf::from)
+                .map(|base| base.join(app_name))
+                .unwrap_or_default(),
+            InstallTarget::AppData => std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .map(|base| base.join("Programs").join(app_name))
+                .unwrap_or_default(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct InstallComponent {
     pub component_path: PathBuf,

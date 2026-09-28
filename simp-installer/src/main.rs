@@ -8,6 +8,7 @@ mod args;
 #[cfg(feature = "ui-preview")]
 mod fixture;
 mod install;
+mod platform;
 mod ui;
 
 #[tokio::main]
@@ -39,6 +40,6 @@ async fn preview_loads_manifest_without_a_packaged_executable() {
         .await
         .unwrap();
 
-    assert_eq!(manifest.core_config.name, "Example App");
+    assert_eq!(manifest.core_config.name, "Example Application");
     assert_eq!(manifest.entries[0].name, "example.txt");
 }

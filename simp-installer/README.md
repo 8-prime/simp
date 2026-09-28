@@ -9,25 +9,38 @@ resolution will live outside the UI. This prototype does not install files yet.
 From the workspace root:
 
 ```powershell
-# Ready -> Installing -> Finished (click Install)
+# Welcome -> License -> Location -> Tasks -> Ready -> Installing -> Finished
 cargo run -p simp-installer --features ui-preview
 
-# Ready -> Installing -> Failed (click Install)
+# The same wizard, with a simulated failure during installation
 cargo run -p simp-installer --features ui-preview -- --preview-failure
 ```
 
-The preview takes about five seconds, uses a predefined manifest, and never writes
-application files. It does not need a package appended to the executable. The
-failure scenario stops partway through. Close works at
-any point; Restart preview returns to Ready after either outcome.
+The wizard follows the seven setup screens in the design reference. It uses
+Segoe UI, white content panels, blue primary buttons, step dots, a summary panel,
+and a green progress bar with expandable details. The native title bar follows
+the Windows appearance setting.
+
+The preview uses a predefined manifest and never writes application files or
+changes system settings. Accept the sample license to enable Next, enter an
+absolute installation path or use Browse, and select optional tasks. Back keeps
+your choices; the summary shows the current path and selected tasks. License and
+task pages are omitted when those values are absent from a manifest.
+
+Click Install on the summary to run the five-second simulation. Cancel closes
+the window, including during progress. The failure scenario stops partway through;
+Try again returns to the summary. Finish closes the successful preview. The launch
+and release-note checkboxes demonstrate the completion screen only; they do not
+launch anything. The preview needs no package appended to the executable.
 
 The Cargo feature selects preview mode by default. The `--preview` option also
 selects the successful preview; `--preview-failure` selects the failure scenario.
 Use `--runtime` to read the appended manifest from an executable built with the
 preview feature.
-Normal launches read the appended manifest from their own executable and display
-its application details. Installation is still under development. A normal
-unpackaged `cargo run` launch reports the missing package in the window.
+Normal launches read the appended manifest from their own executable and show
+the same wizard with the application's metadata. Install stays disabled until the
+installation operation is implemented. A normal unpackaged `cargo run` launch
+reports the missing package in the window.
 Unknown arguments show an error in the window.
 
 ```powershell

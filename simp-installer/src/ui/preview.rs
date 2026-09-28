@@ -4,30 +4,25 @@ use std::time::Duration;
 
 use gpui_kit::Context;
 
-use super::installer::{AppDetails, InstallerState, InstallerView};
+use super::{
+    installer::InstallerView,
+    wizard::{InstallerState, Page},
+};
 
 impl InstallerView {
-    pub(super) fn preview(details: AppDetails, fail: bool, cx: &mut Context<Self>) -> Self {
-        Self {
-            focus: cx.focus_handle(),
-            state: InstallerState::Ready,
-            details: Some(details),
-            preview_failure: Some(fail),
-            preview_task: None,
-        }
-    }
-
     pub(super) fn start_preview(&mut self, cx: &mut Context<Self>) {
         let Some(fail) = self.preview_failure else {
             return;
         };
-        if !matches!(self.state, InstallerState::Ready) {
+        if !matches!(self.state, InstallerState::Choosing(Page::Ready)) {
             return;
         }
         self.state = InstallerState::Installing {
             percent: 0,
-            action: "Preparing installation",
+            action: "Preparing to install...",
         };
+        self.log = vec!["Preparing to install...".into()];
+        self.current_file.clear();
         cx.notify();
 
         // Timers yield to GPUI's event loop. Real synchronous installation will run
@@ -40,6 +35,25 @@ impl InstallerView {
                 let Some(view) = this.upgrade() else { return };
                 view.update(cx, |view, cx| {
                     view.state = preview_step(step, fail);
+                    let line = match step {
+                        4 => Some("Extracting files...".to_owned()),
+                        7 | 11 => {
+                            let file = if step == 7 { "app.dll" } else { "core.dll" };
+                            view.current_file = view
+                                .details
+                                .as_ref()
+                                .map(|details| details.destination.join(file).display().to_string())
+                                .unwrap_or_default();
+                            Some(view.current_file.clone())
+                        }
+                        14 => Some("Copying files...".to_owned()),
+                        17 => Some("Applying selected tasks...".to_owned()),
+                        19 => Some("Finalizing installation...".to_owned()),
+                        _ => None,
+                    };
+                    if let Some(line) = line {
+                        view.log.push(line);
+                    }
                     cx.notify();
                 });
                 if fail && step == 12 {
@@ -61,12 +75,34 @@ fn preview_step(step: u8, fail: bool) -> InstallerState {
         InstallerState::Installing {
             percent: step * 5,
             action: if step < 4 {
-                "Preparing installation"
+                "Preparing to install..."
             } else if step < 17 {
-                "Copying application files"
+                "Extracting files..."
             } else {
-                "Finishing up"
+                "Finalizing installation..."
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_reaches_finished_and_failure_never_does() {
+        assert!(matches!(
+            preview_step(19, false),
+            InstallerState::Installing { percent: 95, .. }
+        ));
+        assert!(matches!(preview_step(20, false), InstallerState::Finished));
+        assert!(matches!(
+            preview_step(12, true),
+            InstallerState::Failed { .. }
+        ));
+        assert!(matches!(
+            preview_step(20, true),
+            InstallerState::Failed { .. }
+        ));
     }
 }
