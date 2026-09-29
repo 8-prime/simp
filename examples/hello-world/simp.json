@@ -1,0 +1,18 @@
+{
+  "core_config": {
+    "name": "SIMP Example",
+    "version": "1.0.0",
+    "description": "A small Hello World application packaged with SIMP.",
+    "eula": null,
+    "auto_start": null,
+    "desktop_icon": null,
+    "start_menu": null,
+    "add_to_path": null,
+    "target": "AppData"
+  },
+  "components": [
+    {
+      "component_path": "payload"
+    }
+  ]
+}
