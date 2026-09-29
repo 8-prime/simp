@@ -1,0 +1,2 @@
+// GPUI loads icon resource 1 for the installer window on Windows.
+1 ICON "assets/simp-installer.ico"

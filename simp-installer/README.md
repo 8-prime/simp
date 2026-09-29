@@ -52,6 +52,12 @@ Release builds hide the console window on Windows. Keep the `ui-preview` feature
 out of distributable installer builds. Rebuild `simp-cli` after rebuilding the
 release installer: it currently embeds that executable at compile time.
 
+The Windows application icon is generated from `../assets/simpicon.png` as
+`assets/simp-installer.ico` with 16, 24, 32, 48, 64, 128, and 256 pixel images.
+The build script embeds it as icon resource 1, which GPUI also uses for the
+installer window. Rebuild the release installer before rebuilding `simp-cli` to
+include icon changes in packaged installers.
+
 ## Development
 
 Use the Rust MSVC toolchain and Visual Studio C++ build tools with a Windows SDK.

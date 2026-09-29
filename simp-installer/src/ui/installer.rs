@@ -121,7 +121,7 @@ impl InstallerView {
         };
         let _options = details.install_options();
         todo!(
-            "run InstallOperation with the manifest and selected options on a worker, then forward InstallEvent values to the view"
+            "start an async task, await InstallOperation::run with the manifest and selected options, then forward InstallEvent values to the view"
         )
     }
 

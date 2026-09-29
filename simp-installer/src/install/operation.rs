@@ -44,7 +44,7 @@ pub trait EventSink {
     fn emit(&mut self, event: InstallEvent);
 }
 
-/// Synchronous installation work. The caller chooses which thread runs it.
+/// Asynchronous installation work, independent of the UI event loop.
 pub struct InstallOperation {
     manifest: Manifest,
     options: InstallOptions,
@@ -55,7 +55,7 @@ impl InstallOperation {
         Self { manifest, options }
     }
 
-    pub fn run(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
+    pub async fn run(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
         todo!(
             "validate entries, create the destination, install files, apply selected tasks, and emit progress through events"
         )
@@ -67,19 +67,21 @@ impl InstallOperation {
         )
     }
 
-    fn create_destination(&self) -> eyre::Result<()> {
-        todo!("create the selected installation directory with a useful error on failure")
+    async fn create_destination(&self) -> eyre::Result<()> {
+        todo!("create the selected installation directory with tokio::fs and report failures")
     }
 
-    fn install_files(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
-        todo!("write each validated entry and emit InstallingFile progress")
+    async fn install_files(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
+        todo!("await write_entry for each validated entry and emit InstallingFile progress")
     }
 
-    fn write_entry(&self, entry: &ManifestEntry, path: &Path) -> eyre::Result<()> {
-        todo!("write one validated manifest entry beneath the destination directory")
+    async fn write_entry(&self, entry: &ManifestEntry, path: &Path) -> eyre::Result<()> {
+        todo!("write one validated manifest entry beneath the destination with tokio::fs")
     }
 
-    fn apply_optional_tasks(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
-        todo!("perform only the tasks selected in InstallOptions and emit ApplyingTask events")
+    async fn apply_optional_tasks(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
+        todo!(
+            "perform selected tasks asynchronously (use spawn_blocking for blocking Windows APIs) and emit ApplyingTask events"
+        )
     }
 }
