@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use simp_core::Manifest;
 
-use crate::install::operation::{InstallOptions, InstallTask};
+use crate::install::operation::{InstallEvent, InstallOptions, InstallTask};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
@@ -27,8 +27,7 @@ impl Page {
     ];
 }
 
-// Presentation state only. A future installation operation will supply progress events.
-#[cfg_attr(not(feature = "ui-preview"), allow(dead_code))]
+// Presentation state only. Events and the operation result drive runtime progress.
 pub(super) enum InstallerState {
     Choosing(Page),
     Installing { percent: u8, action: &'static str },
@@ -37,6 +36,26 @@ pub(super) enum InstallerState {
 }
 
 impl InstallerState {
+    pub fn from_install_event(event: &InstallEvent) -> Self {
+        let (percent, action) = match event {
+            InstallEvent::Started { .. } => (0, "Preparing to install..."),
+            InstallEvent::InstallingFile {
+                completed, total, ..
+            } => {
+                let percent = if *total == 0 {
+                    0
+                } else {
+                    (u128::from((*completed).min(*total)) * 100 / u128::from(*total)) as u8
+                };
+                (percent, "Installing files...")
+            }
+            InstallEvent::ApplyingTask { .. } => (100, "Applying selected tasks..."),
+            // Await the worker result before reporting success to the user.
+            InstallEvent::Finished => (100, "Finalizing installation..."),
+        };
+        Self::Installing { percent, action }
+    }
+
     pub fn page(&self) -> Option<Page> {
         match self {
             Self::Choosing(page) => Some(*page),
@@ -245,5 +264,26 @@ mod tests {
         let options = details.install_options();
         assert!(!options.desktop_shortcut);
         assert!(options.autostart);
+    }
+
+    #[test]
+    fn progress_handles_empty_totals_and_large_counts_without_reporting_success_early() {
+        for (completed, total, expected) in [
+            (1, 2, 50),
+            (0, 0, 0),
+            (3, 2, 100),
+            (u64::MAX, u64::MAX, 100),
+        ] {
+            assert!(matches!(
+                InstallerState::from_install_event(&InstallEvent::InstallingFile {
+                    path: "app.exe".into(), completed, total,
+                }),
+                InstallerState::Installing { percent, .. } if percent == expected
+            ));
+        }
+        assert!(matches!(
+            InstallerState::from_install_event(&InstallEvent::Finished),
+            InstallerState::Installing { percent: 100, .. }
+        ));
     }
 }

@@ -14,5 +14,8 @@ eyre = "0.6.14"
 simp-core = { path="../simp-core"}
 tokio = { version = "1.53.1", features = ["full"] }
 
+[dev-dependencies]
+gpui-kit = { version = "0.6.6", features = ["test-support"] }
+
 [build-dependencies]
 embed-resource = "3.0.11"

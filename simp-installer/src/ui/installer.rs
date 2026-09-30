@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use gpui_kit::base::{Progress, Radio, RadioGroup};
 use gpui_kit::component::{
@@ -17,6 +17,7 @@ use simp_core::Manifest;
 
 use super::wizard::{AppDetails, InstallerState, Page};
 use crate::args::LaunchMode;
+use crate::install::operation::{InstallEvent, InstallTask};
 
 const INK: u32 = 0x101539;
 const BLUE: u32 = 0x087bff;
@@ -27,13 +28,18 @@ pub(super) struct InstallerView {
     pub focus: FocusHandle,
     pub state: InstallerState,
     pub details: Option<AppDetails>,
-    manifest: Option<Manifest>,
+    manifest: Option<Arc<Manifest>>,
+    runtime: tokio::runtime::Handle,
+    runtime_task: Option<gpui_kit::Task<()>>,
+    unavailable_tasks: bool,
     destination_input: Entity<InputState>,
     license_accepted: bool,
     pub show_details: bool,
     pub log: Vec<String>,
     pub current_file: String,
+    #[cfg(feature = "ui-preview")]
     launch_on_finish: bool,
+    #[cfg(feature = "ui-preview")]
     release_notes: bool,
     folder_error: Option<String>,
     #[cfg(feature = "ui-preview")]
@@ -46,11 +52,13 @@ pub(super) struct InstallerView {
 impl InstallerView {
     pub fn new(
         installer: Result<(LaunchMode, Manifest), String>,
+        runtime: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         #[cfg(feature = "ui-preview")]
         let mut preview_failure = None;
+        let mut unavailable_tasks = false;
         let (details, manifest, state) = match installer {
             #[cfg(feature = "ui-preview")]
             Ok((LaunchMode::Preview { fail }, manifest)) => {
@@ -63,7 +71,10 @@ impl InstallerView {
                 )
             }
             Ok((LaunchMode::Runtime, manifest)) => {
-                let details = AppDetails::from_manifest(&manifest);
+                let mut details = AppDetails::from_manifest(&manifest);
+                unavailable_tasks = !details.tasks.is_empty();
+                // These actions have no backend yet. Runtime setup offers files only.
+                details.tasks.clear();
                 (
                     Some(details),
                     Some(manifest),
@@ -91,13 +102,18 @@ impl InstallerView {
             focus: cx.focus_handle(),
             state,
             details,
-            manifest,
+            manifest: manifest.map(Arc::new),
+            runtime,
+            runtime_task: None,
+            unavailable_tasks,
             destination_input,
             license_accepted: false,
             show_details: true,
             log: Vec::new(),
             current_file: String::new(),
+            #[cfg(feature = "ui-preview")]
             launch_on_finish: true,
+            #[cfg(feature = "ui-preview")]
             release_notes: false,
             folder_error: None,
             #[cfg(feature = "ui-preview")]
@@ -114,15 +130,107 @@ impl InstallerView {
         false
     }
 
-    fn start_install(&mut self, _cx: &mut Context<Self>) {
-        let (Some(_manifest), Some(details)) = (self.manifest.as_ref(), self.details.as_ref())
+    fn can_install(&self) -> bool {
+        matches!(self.state, InstallerState::Choosing(Page::Ready))
+            && self.manifest.is_some()
+            && self.details.as_ref().is_some_and(|details| {
+                details.destination.is_absolute()
+                    && (details.license.is_none() || self.license_accepted)
+            })
+    }
+
+    pub(super) fn guard_window_close(view: &Entity<Self>, window: &Window, cx: &gpui_kit::App) {
+        let view = view.downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            view.upgrade().is_none_or(|view| view.read(cx).can_close())
+        });
+    }
+
+    fn can_close(&self) -> bool {
+        self.is_preview() || !matches!(self.state, InstallerState::Installing { .. })
+    }
+
+    fn start_install(&mut self, cx: &mut Context<Self>) {
+        if !self.can_install() || self.is_preview() {
+            return;
+        }
+        let (Some(manifest), Some(details)) = (self.manifest.as_ref(), self.details.as_ref())
         else {
             return;
         };
-        let _options = details.install_options();
-        todo!(
-            "start an async task, await InstallOperation::run with the manifest and selected options, then forward InstallEvent values to the view"
-        )
+        let options = details.install_options();
+        let destination = options.destination.display().to_string();
+        let (mut events, worker) =
+            super::runtime::start(&self.runtime, Arc::clone(manifest), options);
+        self.state = InstallerState::Installing {
+            percent: 0,
+            action: "Preparing to install...",
+        };
+        self.log = vec!["Preparing to install...".into()];
+        self.current_file.clear();
+        cx.notify();
+
+        self.runtime_task = Some(cx.spawn(async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                if this
+                    .update(cx, |view, cx| {
+                        view.on_install_event(event);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = worker
+                .await
+                .unwrap_or_else(|error| Err(format!("Installation worker stopped: {error}")));
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.state = InstallerState::Finished;
+                        view.log.push("Installation completed.".into());
+                    }
+                    Err(message) => {
+                        view.log.push(format!("Installation failed: {message}"));
+                        view.state = InstallerState::Failed {
+                            message: format!(
+                                "Could not install to {destination}.\n\n{message}\n\nSome files may already have been installed. Review the installation folder before trying again."
+                            ),
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn on_install_event(&mut self, event: InstallEvent) {
+        self.state = InstallerState::from_install_event(&event);
+        match event {
+            InstallEvent::Started { total_files } => {
+                self.log.push(format!("Installing {total_files} files..."));
+            }
+            InstallEvent::InstallingFile {
+                path,
+                completed,
+                total,
+            } => {
+                self.current_file = path.display().to_string();
+                self.log
+                    .push(format!("[{completed}/{total}] {}", self.current_file));
+            }
+            InstallEvent::ApplyingTask { task } => self.log.push(
+                match task {
+                    InstallTask::DesktopShortcut => "Creating desktop shortcut...",
+                    InstallTask::StartMenuEntry => "Creating Start Menu entry...",
+                    InstallTask::Autostart => "Configuring application startup...",
+                    InstallTask::AddToPath => "Updating PATH...",
+                }
+                .into(),
+            ),
+            InstallEvent::Finished => self.log.push("Finalizing installation...".into()),
+        }
     }
 
     fn name(&self) -> &str {
@@ -408,12 +516,11 @@ impl InstallerView {
                         ));
                     }
                 }
-                if !self.is_preview() {
+                if self.unavailable_tasks {
                     content = content.child(
                         div()
-                            .text_color(rgb(0xa5262c))
                             .text_size(px(13.))
-                            .child("Installation is not available in this build yet."),
+                            .child("Only application files will be installed. Shortcuts, startup, and PATH changes are unavailable."),
                     );
                 }
                 content.child(summary).into_any_element()
@@ -489,29 +596,43 @@ impl InstallerView {
                             .overflow_y_scrollbar(),
                     );
                 }
+                if !self.is_preview() {
+                    content = content.child(
+                        div()
+                            .text_size(px(12.))
+                            .child("Please wait for installation to finish before closing Setup."),
+                    );
+                }
                 content.into_any_element()
             }
-            InstallerState::Finished => content
-                .pt_4()
-                .child(
-                    Checkbox::new("launch-on-finish")
-                        .label("Launch application now")
-                        .checked(self.launch_on_finish)
-                        .on_change(cx.listener(|this, checked, _, cx| {
-                            this.launch_on_finish = *checked;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Checkbox::new("view-release-notes")
-                        .label("View release notes")
-                        .checked(self.release_notes)
-                        .on_change(cx.listener(|this, checked, _, cx| {
-                            this.release_notes = *checked;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element(),
+            InstallerState::Finished => {
+                let content = content.pt_4();
+                #[cfg(feature = "ui-preview")]
+                let content = if self.is_preview() {
+                    content
+                        .child(
+                            Checkbox::new("launch-on-finish")
+                                .label("Launch application now")
+                                .checked(self.launch_on_finish)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.launch_on_finish = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Checkbox::new("view-release-notes")
+                                .label("View release notes")
+                                .checked(self.release_notes)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.release_notes = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                } else {
+                    content
+                };
+                content.into_any_element()
+            }
             InstallerState::Failed { message } => content
                 .child(
                     div()
@@ -574,7 +695,7 @@ impl InstallerView {
                 let ready = *page == Page::Ready;
                 let enabled = self.details.as_ref().is_some_and(|details| {
                     if ready {
-                        self.is_preview()
+                        self.can_install()
                     } else {
                         details.can_continue(*page, self.license_accepted)
                     }
@@ -612,26 +733,37 @@ impl InstallerView {
                     ),
                 );
             }
-            InstallerState::Failed { .. } =>
-            {
-                #[cfg(feature = "ui-preview")]
-                if self.is_preview() {
-                    buttons =
-                        buttons.child(primary_button("restart-preview", "Try again").on_click(
-                            cx.listener(|this, _, window, cx| {
+            InstallerState::Failed { .. } => {
+                if self.manifest.is_some() && self.details.is_some() {
+                    buttons = buttons.child(primary_button("retry-install", "Try again").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            #[cfg(feature = "ui-preview")]
+                            {
                                 this.preview_task = None;
-                                this.state = InstallerState::Choosing(Page::Ready);
-                                window.focus(&this.focus, cx);
-                                cx.notify();
-                            }),
-                        ));
+                            }
+                            this.runtime_task = None;
+                            this.state = InstallerState::Choosing(if this.is_preview() {
+                                Page::Ready
+                            } else {
+                                Page::Location
+                            });
+                            this.log.clear();
+                            this.current_file.clear();
+                            window.focus(&this.focus, cx);
+                            cx.notify();
+                        }),
+                    ));
                 }
             }
         }
-        // Closing only stops the UI simulation; no installation side effects exist yet.
         buttons = buttons.child(
             secondary_button("cancel", if page.is_none() { "Close" } else { "Cancel" })
-                .on_click(|_, window, _| window.remove_window()),
+                .disabled(!self.can_close())
+                .on_click(cx.listener(|this, _, window, _| {
+                    if this.can_close() {
+                        window.remove_window();
+                    }
+                })),
         );
         footer_row(dots, buttons)
     }
@@ -773,5 +905,215 @@ impl Render for InstallerView {
             );
         }
         root.child(self.footer(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{TestAppContext, VisualTestContext, component::Root, size};
+    use simp_core::{CoreConfig, InstallTarget, ManifestEntry};
+    use std::{
+        fs,
+        path::Path,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "simp-ui-test-{}-{timestamp}-{}",
+                std::process::id(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed),
+            ));
+            // create_dir establishes ownership; never reuse an existing directory.
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn setup(
+        cx: &mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        destination: &Path,
+        entries: Vec<ManifestEntry>,
+    ) -> (Entity<InstallerView>, VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let manifest = Manifest {
+            core_config: CoreConfig {
+                name: "UI test".into(),
+                version: "1.0".into(),
+                description: None,
+                eula: None,
+                auto_start: Some(true),
+                desktop_icon: Some(true),
+                start_menu: Some(true),
+                add_to_path: Some(true),
+                target: InstallTarget::Custom(destination.display().to_string()),
+            },
+            entries,
+        };
+        let mut installer = None;
+        let window = cx.open_window(size(px(520.), px(500.)), |window, cx| {
+            let view = cx.new(|cx| {
+                InstallerView::new(
+                    Ok((LaunchMode::Runtime, manifest)),
+                    runtime.handle().clone(),
+                    window,
+                    cx,
+                )
+            });
+            InstallerView::guard_window_close(&view, window, cx);
+            installer = Some(view.clone());
+            Root::new(view, window, cx).bordered(false)
+        });
+        (
+            installer.unwrap(),
+            VisualTestContext::from_window(window.into(), cx),
+        )
+    }
+
+    fn wait_for_install(view: &Entity<InstallerView>, cx: &mut VisualTestContext) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if cx.read(|cx| !matches!(view.read(cx).state, InstallerState::Installing { .. })) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "Installation did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn payload() -> Vec<ManifestEntry> {
+        vec![
+            ManifestEntry {
+                name: "app.txt".into(),
+                data: b"hello".to_vec(),
+            },
+            ManifestEntry {
+                name: "data.bin".into(),
+                data: vec![0, 1, 255],
+            },
+        ]
+    }
+
+    #[gpui_kit::test]
+    fn install_button_copies_payload_and_protects_window_until_finished(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let destination = directory.0.join("installed");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (view, mut cx) = setup(cx, &runtime, &destination, payload());
+
+        cx.update(|window, cx| {
+            window.click("next", cx); // Welcome -> Location.
+            window.click("next", cx); // Location -> Ready; unavailable tasks are omitted.
+            window.click("next", cx); // Install.
+            window.click("cancel", cx);
+            assert!(!cx.windows().is_empty());
+        });
+        assert!(!cx.simulate_close());
+        wait_for_install(&view, &mut cx);
+        assert_eq!(fs::read(destination.join("app.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(destination.join("data.bin")).unwrap(), [0, 1, 255]);
+        cx.read(|cx| {
+            let view = view.read(cx);
+            assert!(matches!(view.state, InstallerState::Finished));
+            assert!(view.log.iter().any(|line| line.starts_with("[1/2]")));
+            assert!(view.log.iter().any(|line| line.starts_with("[2/2]")));
+        });
+        assert!(cx.simulate_close());
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("launch-on-finish").is_none());
+            assert!(window.try_find("view-release-notes").is_none());
+            window.click("finish", cx);
+        });
+        assert!(cx.read(|cx| cx.windows().is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn write_failure_is_shown_and_retry_can_change_destination(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let blocked = directory.0.join("existing-file");
+        fs::write(&blocked, b"keep me").unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (view, mut cx) = setup(cx, &runtime, &blocked, payload());
+        cx.update(|window, cx| {
+            for _ in 0..3 {
+                window.click("next", cx);
+            }
+        });
+        wait_for_install(&view, &mut cx);
+        cx.read(|cx| assert!(matches!(view.read(cx).state, InstallerState::Failed { .. })));
+        assert_eq!(fs::read(&blocked).unwrap(), b"keep me");
+        assert!(cx.simulate_close());
+        cx.update(|window, cx| window.click("retry-install", cx));
+        cx.read(|cx| {
+            assert!(matches!(
+                view.read(cx).state,
+                InstallerState::Choosing(Page::Location)
+            ))
+        });
+
+        let destination = directory.0.join("retry");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.details.as_mut().unwrap().destination = destination.clone();
+                view.destination_input.update(cx, |input, cx| {
+                    input.set_value(destination.display().to_string(), window, cx);
+                });
+                cx.notify();
+            });
+            window.click("next", cx);
+            window.click("next", cx);
+        });
+        wait_for_install(&view, &mut cx);
+        cx.read(|cx| assert!(matches!(view.read(cx).state, InstallerState::Finished)));
+        assert_eq!(fs::read(destination.join("app.txt")).unwrap(), b"hello");
+    }
+
+    #[gpui_kit::test]
+    fn empty_payload_finishes_without_waiting_for_file_progress(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let destination = directory.0.join("empty");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (view, mut cx) = setup(cx, &runtime, &destination, vec![]);
+        cx.update(|window, cx| {
+            for _ in 0..3 {
+                window.click("next", cx);
+            }
+        });
+        wait_for_install(&view, &mut cx);
+        cx.read(|cx| assert!(matches!(view.read(cx).state, InstallerState::Finished)));
+        assert!(destination.is_dir());
     }
 }

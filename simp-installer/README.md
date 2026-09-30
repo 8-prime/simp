@@ -1,8 +1,9 @@
-# Installer GUI prototype
+# Installer runtime and GUI
 
 The end-user installer window uses GPUI Kit. The UI lives in `src/ui`; the
-package reader lives in `src/install`. Installation operations and Windows target
-resolution will live outside the UI. This prototype does not install files yet.
+package reader and file installation operation live in `src/install`. The UI
+adapter runs the operation on Tokio and forwards its events to GPUI. A packaged
+runtime can install a flat set of files to the folder selected in the wizard.
 
 ## Try it
 
@@ -38,9 +39,16 @@ selects the successful preview; `--preview-failure` selects the failure scenario
 Use `--runtime` to read the appended manifest from an executable built with the
 preview feature.
 Normal launches read the appended manifest from their own executable and show
-the same wizard with the application's metadata. Install stays disabled until the
-installation operation is implemented. A normal unpackaged `cargo run` launch
-reports the missing package in the window.
+the same wizard with the application's metadata. Install writes the package files
+to the selected folder and reports completed-file counts, paths, and errors.
+On failure, Try again returns to the location page and retains the package and
+license consent. Already written files are not rolled back.
+Cancel and native window closing are blocked while a real installation runs.
+A normal unpackaged `cargo run` launch reports the missing package in the window.
+Runtime task pages are omitted because shortcuts, autostart, and PATH integration
+are not implemented; the summary explains this when those tasks are configured.
+Launch and release-note completion checkboxes are shown only in previews until
+the manifest supports their targets.
 Unknown arguments show an error in the window.
 
 ```powershell
@@ -76,9 +84,12 @@ Enter / Space activation, progress responsiveness, both outcomes, window closing
 and whether the app exits after closing its last window. Measure the release
 executable size and verify its runtime dependencies on that clean machine.
 
-## Next integration
+## Remaining installation work
 
-Validate the appended package footer and run a synchronous installation operation on a worker, with
-an event sink forwarding semantic progress to the UI. Keep GPUI, channels, and
-thread scheduling in the UI adapter. Add real cancellation/close handling when
-installation side effects exist; the current Close behavior only stops a preview.
+Add directory-preserving packaging and parent-directory creation, optional Windows
+tasks, elevation for protected destinations, cancellation, and rollback. The
+current operation overwrites existing files and can leave a partial installation
+after failure. Keep GPUI, channels, and thread scheduling in the UI adapter.
+Headless GUI tests exercise real payload installation, failure/retry, progress,
+and the close guard. Native Windows appearance and accessibility still need the
+manual checks above.

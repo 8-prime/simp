@@ -1,6 +1,7 @@
 mod installer;
 #[cfg(feature = "ui-preview")]
 mod preview;
+mod runtime;
 mod wizard;
 
 use gpui_kit::component::{Root, Theme, ThemeMode};
@@ -11,6 +12,7 @@ use crate::args::LaunchMode;
 use installer::InstallerView;
 
 pub fn run(installer: Result<(LaunchMode, Manifest), String>) {
+    let runtime = tokio::runtime::Handle::current();
     let title = installer
         .as_ref()
         .map(|(_, manifest)| format!("{} Setup", manifest.core_config.name))
@@ -60,10 +62,11 @@ pub fn run(installer: Result<(LaunchMode, Manifest), String>) {
                     },
                     |window, cx| {
                         let view = cx.new(|cx| {
-                            let view = InstallerView::new(installer, window, cx);
+                            let view = InstallerView::new(installer, runtime, window, cx);
                             window.focus(&view.focus, cx);
                             view
                         });
+                        InstallerView::guard_window_close(&view, window, cx);
                         cx.new(|cx| Root::new(view, window, cx).bordered(false))
                     },
                 );

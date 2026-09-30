@@ -25,8 +25,8 @@ is compiled, so rebuild it after changes to the installer runtime.
 
 `installer.exe` contains the runtime, both payload files, the manifest, and the
 SIMP footer. It can open the setup wizard and read the package. The current runtime
-UI still disables the Install button; the operation has not been connected to
-the wizard yet. Optional Windows integration tasks are omitted from this example.
+UI installs the payload into the selected folder when Install is clicked.
+Optional Windows integration tasks are omitted from this example.
 
 The generated executable is ignored by Git and can be rebuilt with the commands
 above.

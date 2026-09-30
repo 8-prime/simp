@@ -1,10 +1,10 @@
-// The operation is deliberately unfinished. Runtime installation stays disabled
-// until every TODO below is implemented and the UI handoff is connected.
+// File installation is implemented. Optional Windows integration is still pending.
 #![allow(dead_code, unused_variables)]
 
 use std::{
     collections::HashSet,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use simp_core::{Manifest, ManifestEntry};
@@ -18,6 +18,7 @@ pub enum InstallEvent {
     Started {
         total_files: u64,
     },
+    /// Emitted after a file is fully written. Counts are files, not bytes.
     InstallingFile {
         path: PathBuf,
         completed: u64,
@@ -53,16 +54,19 @@ pub trait EventSink {
 
 /// Asynchronous installation work, independent of the UI event loop.
 pub struct InstallOperation {
-    manifest: Manifest,
+    manifest: Arc<Manifest>,
     options: InstallOptions,
 }
 
 impl InstallOperation {
-    pub fn new(manifest: Manifest, options: InstallOptions) -> Self {
-        Self { manifest, options }
+    pub fn new(manifest: impl Into<Arc<Manifest>>, options: InstallOptions) -> Self {
+        Self {
+            manifest: manifest.into(),
+            options,
+        }
     }
 
-    pub async fn run(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
+    pub async fn run(&self, events: &mut (impl EventSink + ?Sized)) -> eyre::Result<()> {
         events.emit(InstallEvent::Started {
             total_files: self.manifest.entries.len() as u64,
         });
@@ -120,14 +124,17 @@ impl InstallOperation {
         return Ok(());
     }
 
-    async fn install_files(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
+    async fn install_files(&self, events: &mut (impl EventSink + ?Sized)) -> eyre::Result<()> {
+        let total = self.manifest.entries.len() as u64;
+        let mut completed: u64 = 0;
         for entry in self.manifest.entries.iter() {
             let target_path = self.options.destination.join(&entry.name);
             self.write_entry(&entry, &target_path).await?;
+            completed += 1;
             events.emit(InstallEvent::InstallingFile {
                 path: target_path,
-                completed: 0, //TODO: correctly set this plz
-                total: 0,     //TODO: correctly set this plz
+                completed,
+                total,
             });
         }
         return Ok(());
@@ -136,7 +143,7 @@ impl InstallOperation {
     async fn write_entry(&self, entry: &ManifestEntry, path: &Path) -> eyre::Result<()> {
         let mut file = File::create(path).await?;
         file.write_all(&entry.data).await?;
-
+        file.flush().await?;
         return Ok(());
     }
 
