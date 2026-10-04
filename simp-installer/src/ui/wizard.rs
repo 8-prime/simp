@@ -78,6 +78,7 @@ pub(super) struct AppDetails {
     pub description: String,
     pub license: Option<String>,
     pub destination: PathBuf,
+    pub main_executable: Option<PathBuf>,
     pub required_bytes: u64,
     pub tasks: Vec<OptionalTask>,
 }
@@ -91,6 +92,7 @@ impl AppDetails {
             description: config.description.clone().unwrap_or_default(),
             license: config.eula.clone().filter(|text| !text.trim().is_empty()),
             destination: config.target.resolve(&config.name),
+            main_executable: config.main_executable.as_ref().map(PathBuf::from),
             required_bytes: manifest.entries.iter().fold(0_u64, |total, entry| {
                 total.saturating_add(entry.data.len() as u64)
             }),
@@ -112,11 +114,14 @@ impl AppDetails {
                 ),
                 (
                     InstallTask::AddToPath,
-                    "Add application to the system PATH",
+                    "Add application to PATH",
                     config.add_to_path,
                 ),
             ]
             .into_iter()
+            .filter(|(kind, _, _)| {
+                *kind == InstallTask::AddToPath || config.main_executable.is_some()
+            })
             .filter_map(|(kind, label, selected)| {
                 selected.map(|selected| OptionalTask {
                     kind,
@@ -136,6 +141,7 @@ impl AppDetails {
         };
         InstallOptions {
             destination: self.destination.clone(),
+            main_executable: self.main_executable.clone(),
             desktop_shortcut: selected(InstallTask::DesktopShortcut),
             start_menu_entry: selected(InstallTask::StartMenuEntry),
             autostart: selected(InstallTask::Autostart),
@@ -190,13 +196,20 @@ mod tests {
                 version: "1.0".into(),
                 description: None,
                 eula: Some("License text".into()),
+                main_executable: Some("app.exe".into()),
                 auto_start: Some(false),
                 desktop_icon: Some(true),
-                start_menu: None,
+                start_menu: Some(true),
                 add_to_path: None,
                 target: InstallTarget::Custom(std::env::temp_dir().display().to_string()),
             },
-            entries: vec![],
+            entries: ["helper.exe", "app.exe"]
+                .into_iter()
+                .map(|name| simp_core::ManifestEntry {
+                    name: name.into(),
+                    data: Vec::new(),
+                })
+                .collect(),
         }
     }
 
@@ -220,6 +233,7 @@ mod tests {
         manifest.core_config.eula = Some("  ".into());
         manifest.core_config.auto_start = None;
         manifest.core_config.desktop_icon = None;
+        manifest.core_config.start_menu = None;
         let details = AppDetails::from_manifest(&manifest);
         assert_eq!(
             details.adjacent_page(Page::Welcome, true),
@@ -243,27 +257,48 @@ mod tests {
     #[test]
     fn optional_tasks_preserve_configured_defaults_including_false() {
         let details = AppDetails::from_manifest(&manifest());
-        assert_eq!(details.tasks.len(), 2);
+        assert_eq!(details.tasks.len(), 3);
         assert!(details.tasks[0].selected);
-        assert!(!details.tasks[1].selected);
+        assert!(details.tasks[1].selected);
+        assert!(!details.tasks[2].selected);
         assert_eq!(details.pages(), Page::ALL);
     }
 
     #[test]
-    fn install_options_use_current_selection_and_treat_absent_tasks_as_false() {
+    fn install_options_share_a_launch_target_and_preserve_current_selections() {
         let mut details = AppDetails::from_manifest(&manifest());
         let options = details.install_options();
         assert_eq!(options.destination, details.destination);
+        assert_eq!(options.main_executable, Some(PathBuf::from("app.exe")));
         assert!(options.desktop_shortcut);
         assert!(!options.autostart);
-        assert!(!options.start_menu_entry);
+        assert!(options.start_menu_entry);
         assert!(!options.add_to_path);
 
         details.tasks[0].selected = false;
-        details.tasks[1].selected = true;
+        details.tasks[1].selected = false;
+        details.tasks[2].selected = true;
         let options = details.install_options();
+        assert_eq!(options.main_executable, Some(PathBuf::from("app.exe")));
         assert!(!options.desktop_shortcut);
+        assert!(!options.start_menu_entry);
         assert!(options.autostart);
+    }
+
+    #[test]
+    fn launch_tasks_are_unavailable_without_a_main_executable_but_path_is_available() {
+        let mut manifest = manifest();
+        manifest.core_config.main_executable = None;
+        manifest.core_config.add_to_path = Some(true);
+        let details = AppDetails::from_manifest(&manifest);
+        assert_eq!(details.tasks.len(), 1);
+        assert!(details.tasks[0].kind == InstallTask::AddToPath);
+        let options = details.install_options();
+        assert!(options.main_executable.is_none());
+        assert!(!options.desktop_shortcut);
+        assert!(!options.start_menu_entry);
+        assert!(!options.autostart);
+        assert!(options.add_to_path);
     }
 
     #[test]

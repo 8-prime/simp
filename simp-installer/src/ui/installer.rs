@@ -961,6 +961,7 @@ mod tests {
                 version: "1.0".into(),
                 description: None,
                 eula: None,
+                main_executable: None,
                 auto_start: Some(true),
                 desktop_icon: Some(true),
                 start_menu: Some(true),

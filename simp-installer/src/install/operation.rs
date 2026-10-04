@@ -38,10 +38,11 @@ pub enum InstallTask {
     AddToPath,
 }
 
-/// Final actions selected in the wizard. An unavailable (`None`) task and a
-/// visible but unchecked task both become `false` here.
+/// Final actions selected in the wizard, sharing one application launch target.
 pub struct InstallOptions {
     pub destination: PathBuf,
+    /// Packaged launch target for shortcuts and autostart, relative to `destination`.
+    pub main_executable: Option<PathBuf>,
     pub desktop_shortcut: bool,
     pub start_menu_entry: bool,
     pub autostart: bool,
@@ -71,6 +72,17 @@ impl InstallOperation {
             total_files: self.manifest.entries.len() as u64,
         });
         self.validate_entries()?;
+        self.manifest.validate_main_executable()?;
+        if let Some(target) = &self.options.main_executable {
+            self.manifest.validate_file_target(target)?;
+        } else if self.options.desktop_shortcut
+            || self.options.start_menu_entry
+            || self.options.autostart
+        {
+            eyre::bail!(
+                "A main executable is required for desktop shortcuts, Start Menu entries, or autostart"
+            );
+        }
         self.create_destination().await?;
         self.install_files(events).await?;
         events.emit(InstallEvent::Finished);
@@ -155,7 +167,7 @@ impl InstallOperation {
 
 #[cfg(test)]
 mod tests {
-    use super::{InstallOperation, InstallOptions};
+    use super::{EventSink, InstallEvent, InstallOperation, InstallOptions};
     use simp_core::{CoreConfig, InstallTarget, Manifest, ManifestEntry};
     use std::path::Path;
 
@@ -167,6 +179,7 @@ mod tests {
                     version: "1.0".into(),
                     description: None,
                     eula: None,
+                    main_executable: None,
                     auto_start: None,
                     desktop_icon: None,
                     start_menu: None,
@@ -183,6 +196,7 @@ mod tests {
             },
             InstallOptions {
                 destination: "install".into(),
+                main_executable: None,
                 desktop_shortcut: false,
                 start_menu_entry: false,
                 autostart: false,
@@ -215,6 +229,46 @@ mod tests {
         let base = Path::new("install");
         assert!(!InstallOperation::is_path_trav(base, "file.txt"));
         assert!(!InstallOperation::is_path_trav(base, "sub/file.txt"));
+    }
+
+    #[tokio::test]
+    async fn invalid_launch_options_fail_before_creating_the_destination() {
+        struct IgnoreEvents;
+        impl EventSink for IgnoreEvents {
+            fn emit(&mut self, _: InstallEvent) {}
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let destination = std::env::temp_dir().join(format!(
+            "simp-launch-target-test-{}-{timestamp}",
+            std::process::id()
+        ));
+        assert!(!destination.exists());
+        for target in ["", "../app.exe", "missing.exe", "C:/app.exe"] {
+            let mut operation = operation_with_entries(&["helper.exe", "app.exe"]);
+            operation.options.destination = destination.clone();
+            operation.options.main_executable = Some(target.into());
+            assert!(operation.run(&mut IgnoreEvents).await.is_err(), "{target}");
+            assert!(!destination.exists(), "{target}");
+        }
+
+        for (desktop_shortcut, start_menu_entry, autostart) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut operation = operation_with_entries(&["helper.exe", "app.exe"]);
+            operation.options.destination = destination.clone();
+            operation.options.desktop_shortcut = desktop_shortcut;
+            operation.options.start_menu_entry = start_menu_entry;
+            operation.options.autostart = autostart;
+            let error = operation.run(&mut IgnoreEvents).await.unwrap_err();
+            assert!(error.to_string().contains("A main executable is required"));
+            assert!(!destination.exists());
+        }
     }
 
     #[cfg(windows)]

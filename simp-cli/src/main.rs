@@ -66,15 +66,15 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
+    let manifest = Manifest::new(&config).await?;
     let mut file = File::create(output).await?;
     file.write_all(INSTALLER_EXE).await?;
-    let manifest = Manifest::new(&config).await?;
     let encoded: Vec<u8> = manifest.encode();
     file.write_all(&encoded).await?;
 
     let footer = Footer {
         manifest_offset: u64::try_from(INSTALLER_EXE.len())?,
-        version: 1,
+        version: Footer::FORMAT_VERSION,
     };
 
     let footer_buf: [u8; 14] = footer.into();

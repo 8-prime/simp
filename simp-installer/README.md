@@ -47,8 +47,16 @@ Cancel and native window closing are blocked while a real installation runs.
 A normal unpackaged `cargo run` launch reports the missing package in the window.
 Runtime task pages are omitted because shortcuts, autostart, and PATH integration
 are not implemented; the summary explains this when those tasks are configured.
+`core_config.main_executable` identifies a packaged launch target relative to the
+installation folder. `InstallOptions` carries one optional `main_executable`
+path shared by desktop shortcuts, Start Menu entries, and autostart, with boolean
+selections for each task. Without a launch target those three options are omitted;
+adding the installation folder to PATH does not require a main executable.
+Configured targets are validated when building and reading a package and before
+installation writes files. The manifest change uses package format version 2,
+so rebuild the runtime and CLI together before building new packages.
 Launch and release-note completion checkboxes are shown only in previews until
-the manifest supports their targets.
+runtime launch actions are implemented.
 Unknown arguments show an error in the window.
 
 ```powershell

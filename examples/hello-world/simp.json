@@ -4,6 +4,7 @@
     "version": "1.0.0",
     "description": "A small Hello World application packaged with SIMP.",
     "eula": null,
+    "main_executable": "hello.cmd",
     "auto_start": null,
     "desktop_icon": null,
     "start_menu": null,

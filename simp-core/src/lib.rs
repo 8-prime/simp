@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use bitcode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ pub struct Footer {
 impl Footer {
     pub const MAGIC: u32 = 0x73696D70;
     pub const SIZE: usize = 14;
+    pub const FORMAT_VERSION: u16 = 2;
 }
 
 impl From<Footer> for [u8; 14] {
@@ -49,6 +50,8 @@ pub struct CoreConfig {
     pub version: String,
     pub description: Option<String>,
     pub eula: Option<String>,
+    /// UTF-8 package path relative to the installation directory, not a source path.
+    pub main_executable: Option<String>,
     pub auto_start: Option<bool>,
     pub desktop_icon: Option<bool>,
     pub start_menu: Option<bool>,
@@ -144,6 +147,7 @@ impl Manifest {
             Manifest::handle_component(comp, &mut manifest).await?;
         }
 
+        manifest.validate_main_executable()?;
         return Ok(manifest);
     }
 
@@ -152,7 +156,52 @@ impl Manifest {
     }
 
     pub fn decode(bytes: &[u8]) -> eyre::Result<Self> {
-        Ok(bitcode::decode(bytes)?)
+        let manifest: Self = bitcode::decode(bytes)?;
+        manifest.validate_main_executable()?;
+        Ok(manifest)
+    }
+
+    pub fn validate_main_executable(&self) -> eyre::Result<()> {
+        if let Some(target) = &self.core_config.main_executable {
+            self.validate_file_target(Path::new(target))?;
+        }
+        Ok(())
+    }
+
+    /// Application launch targets must identify exactly one packaged file.
+    pub fn validate_file_target(&self, target: &Path) -> eyre::Result<()> {
+        if !target
+            .components()
+            .any(|part| matches!(part, Component::Normal(_)))
+            || target.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            eyre::bail!(
+                "Application target {} must be a relative file path within the installation directory",
+                target.display()
+            );
+        }
+
+        let matches = self
+            .entries
+            .iter()
+            .filter(|entry| Path::new(&entry.name) == target)
+            .count();
+        match matches {
+            1 => Ok(()),
+            0 => eyre::bail!(
+                "Application target {} is not a packaged file",
+                target.display()
+            ),
+            _ => eyre::bail!(
+                "Application target {} matches multiple packaged files",
+                target.display()
+            ),
+        }
     }
 
     async fn handle_component(
@@ -212,6 +261,7 @@ mod tests {
                 version: "1.0.0".into(),
                 description: None,
                 eula: None,
+                main_executable: Some("app.exe".into()),
                 auto_start: None,
                 desktop_icon: None,
                 start_menu: None,
@@ -225,7 +275,97 @@ mod tests {
         };
 
         let encoded = manifest.encode();
-        let decoded: Manifest = bitcode::decode(&encoded).unwrap();
+        let decoded = Manifest::decode(&encoded).unwrap();
         assert_eq!(decoded, manifest);
+    }
+
+    fn manifest_with_target(target: Option<&str>) -> Manifest {
+        Manifest {
+            core_config: CoreConfig {
+                name: "Example".into(),
+                version: "1.0.0".into(),
+                description: None,
+                eula: None,
+                main_executable: target.map(str::to_owned),
+                auto_start: None,
+                desktop_icon: None,
+                start_menu: None,
+                add_to_path: None,
+                target: InstallTarget::ProgramFiles,
+            },
+            entries: ["helper.exe", "app.exe"]
+                .into_iter()
+                .map(|name| ManifestEntry {
+                    name: name.into(),
+                    data: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn main_executable_identifies_a_packaged_file_without_guessing() {
+        assert!(
+            manifest_with_target(Some("app.exe"))
+                .validate_main_executable()
+                .is_ok()
+        );
+        assert!(
+            manifest_with_target(None)
+                .validate_main_executable()
+                .is_ok()
+        );
+        for target in [
+            "",
+            ".",
+            "missing.exe",
+            "../app.exe",
+            "sub/../app.exe",
+            "C:/app.exe",
+        ] {
+            let manifest = manifest_with_target(Some(target));
+            assert!(manifest.validate_main_executable().is_err(), "{target}");
+            assert!(Manifest::decode(&manifest.encode()).is_err(), "{target}");
+        }
+        let mut manifest = manifest_with_target(Some("app.exe"));
+        manifest.entries.push(ManifestEntry {
+            name: "app.exe".into(),
+            data: Vec::new(),
+        });
+        assert!(manifest.validate_main_executable().is_err());
+    }
+
+    #[test]
+    fn main_executable_is_optional_in_existing_json_configs() {
+        let config: SimpConfig =
+            serde_json::from_str(include_str!("../../examples/hello-world/simp.json")).unwrap();
+        assert_eq!(
+            config.core_config.main_executable.as_deref(),
+            Some("hello.cmd")
+        );
+        let mut json = serde_json::to_value(&config.core_config).unwrap();
+        json.as_object_mut().unwrap().remove("main_executable");
+        let config: CoreConfig = serde_json::from_value(json).unwrap();
+        assert!(config.main_executable.is_none());
+    }
+
+    #[tokio::test]
+    async fn building_a_manifest_validates_the_installed_target() {
+        let mut config: SimpConfig =
+            serde_json::from_str(include_str!("../../examples/hello-world/simp.json")).unwrap();
+        let example_directory =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/hello-world");
+        for component in &mut config.components {
+            component.component_path = example_directory.join(&component.component_path);
+        }
+        let manifest = Manifest::new(&config).await.unwrap();
+        assert_eq!(
+            manifest.core_config.main_executable.as_deref(),
+            Some("hello.cmd")
+        );
+        assert_eq!(Manifest::decode(&manifest.encode()).unwrap(), manifest);
+
+        config.core_config.main_executable = Some("missing.exe".into());
+        assert!(Manifest::new(&config).await.is_err());
     }
 }

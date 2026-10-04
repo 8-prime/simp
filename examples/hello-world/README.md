@@ -4,6 +4,12 @@ This example packages a small Windows command file and a text file using the
 current SIMP JSON schema. `AppData` selects the per-user location beneath
 `%LOCALAPPDATA%\Programs\SIMP Example`.
 
+`core_config.main_executable` identifies the packaged file to launch, relative to
+the installation folder. Here it is `hello.cmd`; an application with several EXEs
+can name its main EXE explicitly. This is the installed package path, not the
+source `component_path`. Packaging currently flattens directories, so use the
+packaged filename. The field may be omitted for packages without a launch target.
+
 Build the runtime and CLI from the workspace root, in this order:
 
 ```powershell

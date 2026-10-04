@@ -28,7 +28,7 @@ fn parse_manifest_bytes(bytes: &[u8]) -> eyre::Result<Manifest> {
     let footer = Footer::try_from(footer_bytes)
         .map_err(|_| eyre::eyre!("Failed to read footer from footer bytes of installer"))?;
 
-    if footer.version != 1 {
+    if footer.version != Footer::FORMAT_VERSION {
         eyre::bail!("Unsupported installer format version {}", footer.version);
     }
 
@@ -55,6 +55,7 @@ mod tests {
                 version: "1.0.0".into(),
                 description: None,
                 eula: None,
+                main_executable: None,
                 auto_start: None,
                 desktop_icon: None,
                 start_menu: None,
@@ -70,7 +71,7 @@ mod tests {
         let manifest_offset = bytes.len() as u64;
         bytes.extend(manifest.encode());
         bytes.extend(<[u8; Footer::SIZE]>::from(Footer {
-            version: 1,
+            version: Footer::FORMAT_VERSION,
             manifest_offset,
         }));
 
@@ -82,7 +83,7 @@ mod tests {
         assert!(parse_manifest_bytes(b"short").is_err());
 
         let footer = Footer {
-            version: 1,
+            version: Footer::FORMAT_VERSION,
             manifest_offset: 100,
         };
         assert!(parse_manifest_bytes(&<[u8; Footer::SIZE]>::from(footer)).is_err());
@@ -91,18 +92,32 @@ mod tests {
     #[test]
     fn rejects_unknown_footer_format() {
         let footer = Footer {
-            version: 2,
+            version: Footer::FORMAT_VERSION + 1,
             manifest_offset: 0,
         };
         let mut bytes = <[u8; Footer::SIZE]>::from(footer);
         assert!(parse_manifest_bytes(&bytes).is_err());
 
         bytes = Footer {
-            version: 1,
+            version: Footer::FORMAT_VERSION,
             manifest_offset: 0,
         }
         .into();
         bytes[0] = 0;
         assert!(parse_manifest_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn rejects_previous_manifest_format_before_decoding() {
+        let bytes = <[u8; Footer::SIZE]>::from(Footer {
+            version: 1,
+            manifest_offset: 0,
+        });
+        let error = parse_manifest_bytes(&bytes).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported installer format version 1")
+        );
     }
 }
