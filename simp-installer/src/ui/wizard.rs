@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use simp_core::Manifest;
+use simp_core::{Manifest, PathScope, PathScopePolicy};
 
 use crate::install::operation::{InstallEvent, InstallOptions, InstallTask};
 
@@ -79,6 +79,8 @@ pub(super) struct AppDetails {
     pub license: Option<String>,
     pub destination: PathBuf,
     pub main_executable: Option<PathBuf>,
+    pub path_scope_policy: PathScopePolicy,
+    pub path_scope: PathScope,
     pub required_bytes: u64,
     pub tasks: Vec<OptionalTask>,
 }
@@ -86,6 +88,7 @@ pub(super) struct AppDetails {
 impl AppDetails {
     pub fn from_manifest(manifest: &Manifest) -> Self {
         let config = &manifest.core_config;
+        let path_scope_policy = config.path_scope.unwrap_or(PathScopePolicy::User);
         Self {
             name: config.name.clone(),
             version: config.version.clone(),
@@ -93,6 +96,8 @@ impl AppDetails {
             license: config.eula.clone().filter(|text| !text.trim().is_empty()),
             destination: config.target.resolve(&config.name),
             main_executable: config.main_executable.as_ref().map(PathBuf::from),
+            path_scope_policy,
+            path_scope: path_scope_policy.initial_scope(),
             required_bytes: manifest.entries.iter().fold(0_u64, |total, entry| {
                 total.saturating_add(entry.data.len() as u64)
             }),
@@ -114,7 +119,11 @@ impl AppDetails {
                 ),
                 (
                     InstallTask::AddToPath,
-                    "Add application to PATH",
+                    match path_scope_policy {
+                        PathScopePolicy::User => "Add application to user PATH",
+                        PathScopePolicy::System => "Add application to system PATH",
+                        PathScopePolicy::UserChoice => "Add application to PATH",
+                    },
                     config.add_to_path,
                 ),
             ]
@@ -145,7 +154,7 @@ impl AppDetails {
             desktop_shortcut: selected(InstallTask::DesktopShortcut),
             start_menu_entry: selected(InstallTask::StartMenuEntry),
             autostart: selected(InstallTask::Autostart),
-            add_to_path: selected(InstallTask::AddToPath),
+            add_to_path: selected(InstallTask::AddToPath).then_some(self.path_scope),
         }
     }
 
@@ -201,6 +210,7 @@ mod tests {
                 desktop_icon: Some(true),
                 start_menu: Some(true),
                 add_to_path: None,
+                path_scope: None,
                 target: InstallTarget::Custom(std::env::temp_dir().display().to_string()),
             },
             entries: ["helper.exe", "app.exe"]
@@ -273,7 +283,7 @@ mod tests {
         assert!(options.desktop_shortcut);
         assert!(!options.autostart);
         assert!(options.start_menu_entry);
-        assert!(!options.add_to_path);
+        assert!(options.add_to_path.is_none());
 
         details.tasks[0].selected = false;
         details.tasks[1].selected = false;
@@ -298,7 +308,30 @@ mod tests {
         assert!(!options.desktop_shortcut);
         assert!(!options.start_menu_entry);
         assert!(!options.autostart);
-        assert!(options.add_to_path);
+        assert_eq!(options.add_to_path, Some(PathScope::User));
+    }
+
+    #[test]
+    fn path_scope_policy_sets_the_initial_scope_and_keeps_disabled_tasks_absent() {
+        for (policy, expected) in [
+            (None, PathScope::User),
+            (Some(PathScopePolicy::User), PathScope::User),
+            (Some(PathScopePolicy::System), PathScope::System),
+            (Some(PathScopePolicy::UserChoice), PathScope::User),
+        ] {
+            let mut manifest = manifest();
+            manifest.core_config.path_scope = policy;
+            manifest.core_config.add_to_path = Some(true);
+            let mut details = AppDetails::from_manifest(&manifest);
+            assert_eq!(details.install_options().add_to_path, Some(expected));
+            let task = details
+                .tasks
+                .iter_mut()
+                .find(|task| task.kind == InstallTask::AddToPath)
+                .unwrap();
+            task.selected = false;
+            assert!(details.install_options().add_to_path.is_none());
+        }
     }
 
     #[test]

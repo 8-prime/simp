@@ -9,6 +9,7 @@
     "desktop_icon": null,
     "start_menu": null,
     "add_to_path": null,
+    "path_scope": "user",
     "target": "AppData"
   },
   "components": [

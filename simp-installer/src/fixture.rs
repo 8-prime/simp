@@ -1,6 +1,6 @@
 //! Manifest used only by the development UI preview.
 
-use simp_core::{CoreConfig, InstallTarget, Manifest, ManifestEntry};
+use simp_core::{CoreConfig, InstallTarget, Manifest, ManifestEntry, PathScopePolicy};
 
 pub fn manifest() -> Manifest {
     Manifest {
@@ -14,6 +14,7 @@ pub fn manifest() -> Manifest {
             desktop_icon: Some(true),
             start_menu: Some(true),
             add_to_path: Some(false),
+            path_scope: Some(PathScopePolicy::UserChoice),
             target: InstallTarget::Custom(
                 r"C:\Program Files\Example Application".into(),
             ),

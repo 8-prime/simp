@@ -53,8 +53,17 @@ path shared by desktop shortcuts, Start Menu entries, and autostart, with boolea
 selections for each task. Without a launch target those three options are omitted;
 adding the installation folder to PATH does not require a main executable.
 Configured targets are validated when building and reading a package and before
-installation writes files. The manifest change uses package format version 2,
+installation writes files. The manifest change uses package format version 3,
 so rebuild the runtime and CLI together before building new packages.
+`core_config.path_scope` accepts `"user"`, `"system"`, or `"user_choice"`.
+Omission uses user scope. Fixed policies show no scope selector; `user_choice`
+shows user/system radio options when the PATH task is checked, defaulting to user.
+`InstallOptions.add_to_path` carries the selected `PathScope`, or `None` when
+disabled. The operation rejects a scope forbidden by the package policy before
+writing files. Scope selection is available in the preview; runtime PATH updates
+and UAC elevation remain unimplemented. An elevated process/helper should be
+launched after Install is clicked and before installation changes begin when
+system PATH is requested; cancelling UAC should leave setup ready to retry.
 Launch and release-note completion checkboxes are shown only in previews until
 runtime launch actions are implemented.
 Unknown arguments show an error in the window.

@@ -13,7 +13,7 @@ use gpui_kit::{
     IntoElement, ParentElement, PathPromptOptions, Render, Role, StatefulInteractiveElement,
     Styled, Window, div, px, relative, rgb, transparent_black,
 };
-use simp_core::Manifest;
+use simp_core::{Manifest, PathScope, PathScopePolicy};
 
 use super::wizard::{AppDetails, InstallerState, Page};
 use crate::args::LaunchMode;
@@ -382,7 +382,7 @@ impl InstallerView {
                             .flex_col()
                             .gap_2()
                             .child(
-                                license_radio(
+                                choice_radio(
                                     "accept-license",
                                     "I accept the terms in the License Agreement",
                                     self.license_accepted,
@@ -397,7 +397,7 @@ impl InstallerView {
                                 }),
                             )
                             .child(
-                                license_radio(
+                                choice_radio(
                                     "decline-license",
                                     "I do not accept the terms in the License Agreement",
                                     !self.license_accepted,
@@ -474,6 +474,55 @@ impl InstallerView {
                                     cx.notify();
                                 })),
                         );
+                        if task.kind == InstallTask::AddToPath
+                            && task.selected
+                            && details.path_scope_policy == PathScopePolicy::UserChoice
+                        {
+                            let user_scope_view = cx.entity().downgrade();
+                            let system_scope_view = cx.entity().downgrade();
+                            content =
+                                content.child(
+                                    RadioGroup::new("path-scope")
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .pl_6()
+                                        .child(
+                                            choice_radio(
+                                                "path-scope-user",
+                                                "Current user",
+                                                details.path_scope == PathScope::User,
+                                            )
+                                            .on_change(move |_, _, _, cx| {
+                                                if let Some(view) = user_scope_view.upgrade() {
+                                                    view.update(cx, |this, cx| {
+                                                        if let Some(details) = &mut this.details {
+                                                            details.path_scope = PathScope::User;
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                        )
+                                        .child(
+                                            choice_radio(
+                                                "path-scope-system",
+                                                "All users (requires administrator)",
+                                                details.path_scope == PathScope::System,
+                                            )
+                                            .on_change(move |_, _, _, cx| {
+                                                if let Some(view) = system_scope_view.upgrade() {
+                                                    view.update(cx, |this, cx| {
+                                                        if let Some(details) = &mut this.details {
+                                                            details.path_scope = PathScope::System;
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                        ),
+                                );
+                        }
                     }
                 }
                 content.into_any_element()
@@ -504,7 +553,16 @@ impl InstallerView {
                             .tasks
                             .iter()
                             .filter(|task| task.selected)
-                            .map(|task| task.label)
+                            .map(|task| {
+                                if task.kind == InstallTask::AddToPath {
+                                    match details.path_scope {
+                                        PathScope::User => "Add application to user PATH",
+                                        PathScope::System => "Add application to system PATH",
+                                    }
+                                } else {
+                                    task.label
+                                }
+                            })
                             .collect();
                         summary = summary.child(summary_row(
                             "Additional tasks:",
@@ -783,7 +841,7 @@ fn primary_button(id: &'static str, label: &'static str) -> Button {
     secondary_button(id, label).primary()
 }
 
-fn license_radio(id: &'static str, label: &'static str, checked: bool) -> Radio {
+fn choice_radio(id: &'static str, label: &'static str, checked: bool) -> Radio {
     let mut indicator = div()
         .size(px(16.))
         .flex_shrink_0()
@@ -954,7 +1012,6 @@ mod tests {
         destination: &Path,
         entries: Vec<ManifestEntry>,
     ) -> (Entity<InstallerView>, VisualTestContext) {
-        cx.update(gpui_kit::init);
         let manifest = Manifest {
             core_config: CoreConfig {
                 name: "UI test".into(),
@@ -966,19 +1023,25 @@ mod tests {
                 desktop_icon: Some(true),
                 start_menu: Some(true),
                 add_to_path: Some(true),
+                path_scope: None,
                 target: InstallTarget::Custom(destination.display().to_string()),
             },
             entries,
         };
+        setup_manifest(cx, runtime, LaunchMode::Runtime, manifest)
+    }
+
+    fn setup_manifest(
+        cx: &mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        mode: LaunchMode,
+        manifest: Manifest,
+    ) -> (Entity<InstallerView>, VisualTestContext) {
+        cx.update(gpui_kit::init);
         let mut installer = None;
         let window = cx.open_window(size(px(520.), px(500.)), |window, cx| {
             let view = cx.new(|cx| {
-                InstallerView::new(
-                    Ok((LaunchMode::Runtime, manifest)),
-                    runtime.handle().clone(),
-                    window,
-                    cx,
-                )
+                InstallerView::new(Ok((mode, manifest)), runtime.handle().clone(), window, cx)
             });
             InstallerView::guard_window_close(&view, window, cx);
             installer = Some(view.clone());
@@ -1013,6 +1076,101 @@ mod tests {
                 data: vec![0, 1, 255],
             },
         ]
+    }
+
+    #[cfg(feature = "ui-preview")]
+    #[gpui_kit::test]
+    fn path_scope_selector_preserves_choices_and_respects_fixed_policies(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut manifest = crate::fixture::manifest();
+        manifest.core_config.eula = None;
+        let (view, mut cx) =
+            setup_manifest(cx, &runtime, LaunchMode::Preview { fail: false }, manifest);
+        let mut manifest = crate::fixture::manifest();
+        manifest.core_config.eula = None;
+        let task_index = cx.read(|cx| {
+            view.read(cx)
+                .details
+                .as_ref()
+                .unwrap()
+                .tasks
+                .iter()
+                .position(|task| task.kind == InstallTask::AddToPath)
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            window.click("next", cx);
+            window.click("next", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("path-scope-system").is_none());
+            window.click(("optional-task", task_index), cx);
+            window.click("path-scope-system", cx);
+            assert_eq!(
+                view.read(cx)
+                    .details
+                    .as_ref()
+                    .unwrap()
+                    .install_options()
+                    .add_to_path,
+                Some(PathScope::System)
+            );
+            window.click("next", cx);
+            window.click("back", cx);
+            assert_eq!(
+                view.read(cx).details.as_ref().unwrap().path_scope,
+                PathScope::System
+            );
+            window.click(("optional-task", task_index), cx);
+            window.render_frame(cx);
+            assert!(window.try_find("path-scope-system").is_none());
+            assert!(
+                view.read(cx)
+                    .details
+                    .as_ref()
+                    .unwrap()
+                    .install_options()
+                    .add_to_path
+                    .is_none()
+            );
+            window.click(("optional-task", task_index), cx);
+            window.click("path-scope-user", cx);
+            assert_eq!(
+                view.read(cx)
+                    .details
+                    .as_ref()
+                    .unwrap()
+                    .install_options()
+                    .add_to_path,
+                Some(PathScope::User)
+            );
+
+            for (policy, scope) in [
+                (PathScopePolicy::User, PathScope::User),
+                (PathScopePolicy::System, PathScope::System),
+            ] {
+                manifest.core_config.path_scope = Some(policy);
+                manifest.core_config.add_to_path = Some(true);
+                view.update(cx, |view, cx| {
+                    view.details = Some(AppDetails::from_manifest(&manifest));
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                assert!(window.try_find("path-scope-user").is_none());
+                assert!(window.try_find("path-scope-system").is_none());
+                assert_eq!(
+                    view.read(cx)
+                        .details
+                        .as_ref()
+                        .unwrap()
+                        .install_options()
+                        .add_to_path,
+                    Some(scope)
+                );
+            }
+        });
     }
 
     #[gpui_kit::test]

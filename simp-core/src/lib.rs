@@ -11,7 +11,7 @@ pub struct Footer {
 impl Footer {
     pub const MAGIC: u32 = 0x73696D70;
     pub const SIZE: usize = 14;
-    pub const FORMAT_VERSION: u16 = 2;
+    pub const FORMAT_VERSION: u16 = 3;
 }
 
 impl From<Footer> for [u8; 14] {
@@ -56,7 +56,46 @@ pub struct CoreConfig {
     pub desktop_icon: Option<bool>,
     pub start_menu: Option<bool>,
     pub add_to_path: Option<bool>,
+    pub path_scope: Option<PathScopePolicy>,
     pub target: InstallTarget,
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Debug, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PathScope {
+    User,
+    System,
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Debug, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PathScopePolicy {
+    User,
+    System,
+    UserChoice,
+}
+
+impl Default for PathScopePolicy {
+    fn default() -> Self {
+        PathScopePolicy::User
+    }
+}
+
+impl PathScopePolicy {
+    pub fn initial_scope(self) -> PathScope {
+        match self {
+            Self::User | Self::UserChoice => PathScope::User,
+            Self::System => PathScope::System,
+        }
+    }
+
+    pub fn allows(self, scope: PathScope) -> bool {
+        match self {
+            Self::User => scope == PathScope::User,
+            Self::System => scope == PathScope::System,
+            Self::UserChoice => true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Debug, Clone)]
@@ -266,6 +305,7 @@ mod tests {
                 desktop_icon: None,
                 start_menu: None,
                 add_to_path: None,
+                path_scope: None,
                 target: InstallTarget::Custom("C:/Example".into()),
             },
             entries: vec![ManifestEntry {
@@ -291,6 +331,7 @@ mod tests {
                 desktop_icon: None,
                 start_menu: None,
                 add_to_path: None,
+                path_scope: None,
                 target: InstallTarget::ProgramFiles,
             },
             entries: ["helper.exe", "app.exe"]
@@ -367,5 +408,47 @@ mod tests {
 
         config.core_config.main_executable = Some("missing.exe".into());
         assert!(Manifest::new(&config).await.is_err());
+    }
+
+    #[test]
+    fn path_scope_policies_parse_from_json_and_survive_packaging() {
+        for (json, policy) in [
+            ("\"user\"", PathScopePolicy::User),
+            ("\"system\"", PathScopePolicy::System),
+            ("\"user_choice\"", PathScopePolicy::UserChoice),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<PathScopePolicy>(json).unwrap(),
+                policy
+            );
+            let mut manifest = manifest_with_target(None);
+            manifest.core_config.path_scope = Some(policy);
+            assert_eq!(Manifest::decode(&manifest.encode()).unwrap(), manifest);
+        }
+        let config: CoreConfig = serde_json::from_str(
+            r#"{"name":"Example","version":"1.0","target":"AppData","add_to_path":true}"#,
+        )
+        .unwrap();
+        assert!(config.path_scope.is_none());
+        assert_eq!(
+            config
+                .path_scope
+                .unwrap_or(PathScopePolicy::User)
+                .initial_scope(),
+            PathScope::User
+        );
+        assert!(serde_json::from_str::<PathScopePolicy>("\"automatic\"").is_err());
+    }
+
+    #[test]
+    fn path_scope_policies_allow_only_the_configured_scopes() {
+        for (policy, user_allowed, system_allowed) in [
+            (PathScopePolicy::User, true, false),
+            (PathScopePolicy::System, false, true),
+            (PathScopePolicy::UserChoice, true, true),
+        ] {
+            assert_eq!(policy.allows(PathScope::User), user_allowed);
+            assert_eq!(policy.allows(PathScope::System), system_allowed);
+        }
     }
 }

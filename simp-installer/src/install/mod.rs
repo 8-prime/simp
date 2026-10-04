@@ -60,6 +60,7 @@ mod tests {
                 desktop_icon: None,
                 start_menu: None,
                 add_to_path: None,
+                path_scope: None,
                 target: InstallTarget::ProgramFiles,
             },
             entries: vec![ManifestEntry {
@@ -110,14 +111,13 @@ mod tests {
     #[test]
     fn rejects_previous_manifest_format_before_decoding() {
         let bytes = <[u8; Footer::SIZE]>::from(Footer {
-            version: 1,
+            version: Footer::FORMAT_VERSION - 1,
             manifest_offset: 0,
         });
         let error = parse_manifest_bytes(&bytes).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Unsupported installer format version 1")
-        );
+        assert!(error.to_string().contains(&format!(
+            "Unsupported installer format version {}",
+            Footer::FORMAT_VERSION - 1
+        )));
     }
 }

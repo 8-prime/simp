@@ -3,11 +3,12 @@
 
 use std::{
     collections::HashSet,
+    default,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
-use simp_core::{Manifest, ManifestEntry};
+use simp_core::{Manifest, ManifestEntry, PathScope, PathScopePolicy};
 use tokio::{
     fs::{File, create_dir_all},
     io::AsyncWriteExt,
@@ -46,7 +47,7 @@ pub struct InstallOptions {
     pub desktop_shortcut: bool,
     pub start_menu_entry: bool,
     pub autostart: bool,
-    pub add_to_path: bool,
+    pub add_to_path: Option<PathScope>,
 }
 
 pub trait EventSink {
@@ -82,6 +83,18 @@ impl InstallOperation {
             eyre::bail!(
                 "A main executable is required for desktop shortcuts, Start Menu entries, or autostart"
             );
+        }
+        if let Some(scope) = self.options.add_to_path {
+            let policy = self
+                .manifest
+                .core_config
+                .path_scope
+                .unwrap_or(PathScopePolicy::default());
+            if !policy.allows(scope) {
+                eyre::bail!(
+                    "Selected PATH scope {scope:?} is not permitted by the package policy {policy:?}"
+                );
+            }
         }
         self.create_destination().await?;
         self.install_files(events).await?;
@@ -168,7 +181,9 @@ impl InstallOperation {
 #[cfg(test)]
 mod tests {
     use super::{EventSink, InstallEvent, InstallOperation, InstallOptions};
-    use simp_core::{CoreConfig, InstallTarget, Manifest, ManifestEntry};
+    use simp_core::{
+        CoreConfig, InstallTarget, Manifest, ManifestEntry, PathScope, PathScopePolicy,
+    };
     use std::path::Path;
 
     fn operation_with_entries(names: &[&str]) -> InstallOperation {
@@ -184,6 +199,7 @@ mod tests {
                     desktop_icon: None,
                     start_menu: None,
                     add_to_path: None,
+                    path_scope: None,
                     target: InstallTarget::ProgramFiles,
                 },
                 entries: names
@@ -200,7 +216,7 @@ mod tests {
                 desktop_shortcut: false,
                 start_menu_entry: false,
                 autostart: false,
-                add_to_path: false,
+                add_to_path: None,
             },
         )
     }
@@ -232,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_launch_options_fail_before_creating_the_destination() {
+    async fn invalid_install_options_fail_before_creating_the_destination() {
         struct IgnoreEvents;
         impl EventSink for IgnoreEvents {
             fn emit(&mut self, _: InstallEvent) {}
@@ -267,6 +283,27 @@ mod tests {
             operation.options.autostart = autostart;
             let error = operation.run(&mut IgnoreEvents).await.unwrap_err();
             assert!(error.to_string().contains("A main executable is required"));
+            assert!(!destination.exists());
+        }
+
+        for (policy, forbidden_scope) in [
+            (None, PathScope::System),
+            (Some(PathScopePolicy::User), PathScope::System),
+            (Some(PathScopePolicy::System), PathScope::User),
+        ] {
+            let mut operation = operation_with_entries(&[]);
+            std::sync::Arc::get_mut(&mut operation.manifest)
+                .unwrap()
+                .core_config
+                .path_scope = policy;
+            operation.options.destination = destination.clone();
+            operation.options.add_to_path = Some(forbidden_scope);
+            let error = operation.run(&mut IgnoreEvents).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("not permitted by the package policy")
+            );
             assert!(!destination.exists());
         }
     }
