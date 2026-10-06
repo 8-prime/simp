@@ -72,9 +72,10 @@ impl InstallerView {
             }
             Ok((LaunchMode::Runtime, manifest)) => {
                 let mut details = AppDetails::from_manifest(&manifest);
-                unavailable_tasks = !details.tasks.is_empty();
-                // These actions have no backend yet. Runtime setup offers files only.
-                details.tasks.clear();
+                if !cfg!(windows) {
+                    unavailable_tasks = !details.tasks.is_empty();
+                    details.tasks.clear();
+                }
                 (
                     Some(details),
                     Some(manifest),
@@ -1019,10 +1020,10 @@ mod tests {
                 description: None,
                 eula: None,
                 main_executable: None,
-                auto_start: Some(true),
-                desktop_icon: Some(true),
-                start_menu: Some(true),
-                add_to_path: Some(true),
+                auto_start: None,
+                desktop_icon: None,
+                start_menu: None,
+                add_to_path: None,
                 path_scope: None,
                 target: InstallTarget::Custom(destination.display().to_string()),
             },
@@ -1186,7 +1187,7 @@ mod tests {
 
         cx.update(|window, cx| {
             window.click("next", cx); // Welcome -> Location.
-            window.click("next", cx); // Location -> Ready; unavailable tasks are omitted.
+            window.click("next", cx); // Location -> Ready; no tasks are configured.
             window.click("next", cx); // Install.
             window.click("cancel", cx);
             assert!(!cx.windows().is_empty());
@@ -1209,6 +1210,58 @@ mod tests {
             window.click("finish", cx);
         });
         assert!(cx.read(|cx| cx.windows().is_empty()));
+    }
+
+    #[cfg(windows)]
+    #[gpui_kit::test]
+    fn runtime_offers_optional_tasks_and_passes_the_selected_path_scope(cx: &mut TestAppContext) {
+        let directory = TestDirectory::new();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let manifest = Manifest {
+            core_config: CoreConfig {
+                name: "UI test".into(),
+                version: "1.0".into(),
+                description: None,
+                eula: None,
+                main_executable: Some("app.exe".into()),
+                auto_start: Some(true),
+                desktop_icon: Some(true),
+                start_menu: Some(true),
+                add_to_path: Some(false),
+                path_scope: Some(PathScopePolicy::UserChoice),
+                target: InstallTarget::Custom(directory.0.display().to_string()),
+            },
+            entries: vec![ManifestEntry {
+                name: "app.exe".into(),
+                data: Vec::new(),
+            }],
+        };
+        let (view, mut cx) = setup_manifest(cx, &runtime, LaunchMode::Runtime, manifest);
+        cx.update(|window, cx| {
+            assert!(!view.read(cx).unavailable_tasks);
+            assert_eq!(view.read(cx).details.as_ref().unwrap().tasks.len(), 4);
+            window.click("next", cx);
+            window.click("next", cx);
+            assert!(matches!(
+                view.read(cx).state,
+                InstallerState::Choosing(Page::Tasks)
+            ));
+            window.click(("optional-task", 3_usize), cx);
+            window.click("path-scope-system", cx);
+            window.click("next", cx);
+            assert!(matches!(
+                view.read(cx).state,
+                InstallerState::Choosing(Page::Ready)
+            ));
+            let options = view.read(cx).details.as_ref().unwrap().install_options();
+            assert!(options.autostart && options.desktop_shortcut && options.start_menu_entry);
+            assert_eq!(options.main_executable, Some(PathBuf::from("app.exe")));
+            assert_eq!(options.add_to_path, Some(PathScope::System));
+        });
     }
 
     #[gpui_kit::test]

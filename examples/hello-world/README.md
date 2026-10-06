@@ -14,8 +14,9 @@ packaged filename. The field may be omitted for packages without a launch target
 `"user_choice"` to let the wizard offer both scopes, initially selecting user PATH.
 Omitting it uses user scope. `add_to_path` still controls whether the optional task
 is offered and initially checked; a null or omitted value hides it. System PATH
-requires elevation. PATH updates and elevation are not implemented by the runtime
-yet, so these settings currently appear only in the UI preview.
+requires launching setup with Run as administrator; there is no automatic UAC
+relaunch yet. Runtime tasks create per-user shortcuts/startup entries and update
+the configured PATH scope. The example omits all optional tasks by default.
 
 Build the runtime and CLI from the workspace root, in this order:
 

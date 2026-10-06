@@ -8,6 +8,7 @@ mod args;
 #[cfg(feature = "ui-preview")]
 mod fixture;
 mod install;
+mod platform;
 mod ui;
 
 #[tokio::main]

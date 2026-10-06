@@ -1,20 +1,20 @@
-// File installation is implemented. Optional Windows integration is still pending.
-#![allow(dead_code, unused_variables)]
-
 use std::{
     collections::HashSet,
-    default,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
+use eyre::WrapErr;
 use simp_core::{Manifest, ManifestEntry, PathScope, PathScopePolicy};
 use tokio::{
     fs::{File, create_dir_all},
     io::AsyncWriteExt,
 };
 
+use crate::platform::{self, ShortcutLocation};
+
 /// Progress reported by the installation operation, independent of the UI.
+#[derive(Debug, PartialEq, Eq)]
 pub enum InstallEvent {
     Started {
         total_files: u64,
@@ -31,7 +31,7 @@ pub enum InstallEvent {
     Finished,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstallTask {
     DesktopShortcut,
     StartMenuEntry,
@@ -96,8 +96,10 @@ impl InstallOperation {
                 );
             }
         }
+        self.prepare_optional_tasks().await?;
         self.create_destination().await?;
         self.install_files(events).await?;
+        self.apply_optional_tasks(events).await?;
         events.emit(InstallEvent::Finished);
         return Ok(());
     }
@@ -141,10 +143,6 @@ impl InstallOperation {
     }
 
     async fn create_destination(&self) -> eyre::Result<()> {
-        if self.options.destination.exists() {
-            return Ok(());
-        }
-
         create_dir_all(&self.options.destination).await?;
         return Ok(());
     }
@@ -172,9 +170,126 @@ impl InstallOperation {
         return Ok(());
     }
 
-    async fn apply_optional_tasks(&self, events: &mut dyn EventSink) -> eyre::Result<()> {
-        //TODO: "perform selected tasks asynchronously (use spawn_blocking for blocking Windows APIs) and emit ApplyingTask events"
+    async fn prepare_optional_tasks(&self) -> eyre::Result<()> {
+        if self.options.desktop_shortcut || self.options.start_menu_entry || self.options.autostart
+        {
+            platform::validate_shortcut_name(&self.manifest.core_config.name)?;
+            if !self.options.destination.is_absolute() {
+                eyre::bail!("Shortcut installation directory must be an absolute path");
+            }
+            if !cfg!(windows) {
+                eyre::bail!("Optional installation tasks are only supported on Windows");
+            }
+        }
+        if let Some(scope) = self.options.add_to_path {
+            platform::validate_path_entry(&self.options.destination)?;
+            let directory = self.options.destination.clone();
+            tokio::task::spawn_blocking(move || platform::check_path_access(scope, &directory))
+                .await
+                .wrap_err("PATH permission check worker failed")??;
+        }
+        Ok(())
+    }
+
+    async fn apply_optional_tasks(
+        &self,
+        events: &mut (impl EventSink + ?Sized),
+    ) -> eyre::Result<()> {
+        if let Some(exe_path) = &self.options.main_executable {
+            if self.options.autostart {
+                self.create_autostart(exe_path, events).await?;
+            }
+
+            if self.options.desktop_shortcut {
+                self.create_desktop_shortcut(exe_path, events).await?;
+            }
+
+            if self.options.start_menu_entry {
+                self.create_start_menu_entry(exe_path, events).await?;
+            }
+        }
+
+        if let Some(scope) = self.options.add_to_path {
+            self.add_to_path(scope, events).await?;
+        }
+
         return Ok(());
+    }
+
+    async fn create_desktop_shortcut(
+        &self,
+        exe_path: &Path,
+        events: &mut (impl EventSink + ?Sized),
+    ) -> eyre::Result<()> {
+        self.create_shortcut(
+            InstallTask::DesktopShortcut,
+            ShortcutLocation::Desktop,
+            exe_path,
+            events,
+        )
+        .await
+    }
+
+    async fn create_start_menu_entry(
+        &self,
+        exe_path: &Path,
+        events: &mut (impl EventSink + ?Sized),
+    ) -> eyre::Result<()> {
+        self.create_shortcut(
+            InstallTask::StartMenuEntry,
+            ShortcutLocation::StartMenu,
+            exe_path,
+            events,
+        )
+        .await
+    }
+
+    async fn create_autostart(
+        &self,
+        exe_path: &Path,
+        events: &mut (impl EventSink + ?Sized),
+    ) -> eyre::Result<()> {
+        self.create_shortcut(
+            InstallTask::Autostart,
+            ShortcutLocation::Startup,
+            exe_path,
+            events,
+        )
+        .await
+    }
+
+    async fn create_shortcut(
+        &self,
+        task: InstallTask,
+        location: ShortcutLocation,
+        exe_path: &Path,
+        events: &mut (impl EventSink + ?Sized),
+    ) -> eyre::Result<()> {
+        events.emit(InstallEvent::ApplyingTask { task });
+        let name = self.manifest.core_config.name.clone();
+        let target = self.options.destination.join(exe_path);
+        let directory = self.options.destination.clone();
+        tokio::task::spawn_blocking(move || {
+            platform::create_shortcut(location, &name, &target, &directory)
+        })
+        .await
+        .wrap_err("Shortcut worker failed")?
+        .wrap_err_with(|| format!("Could not apply {task:?}"))
+    }
+
+    async fn add_to_path(
+        &self,
+        path_scope: PathScope,
+        events: &mut (impl EventSink + ?Sized),
+    ) -> eyre::Result<()> {
+        events.emit(InstallEvent::ApplyingTask {
+            task: InstallTask::AddToPath,
+        });
+        let directory = self.options.destination.clone();
+        tokio::task::spawn_blocking(move || platform::add_to_path(path_scope, &directory))
+            .await
+            .wrap_err("PATH update worker failed")?
+            .wrap_err("Could not add the installation directory to PATH")
     }
 }
 
@@ -320,5 +435,68 @@ mod tests {
         ] {
             assert!(InstallOperation::is_path_trav(base, file));
         }
+    }
+
+    #[tokio::test]
+    async fn shortcut_errors_emit_the_selected_task_and_stop_later_tasks() {
+        struct Events(Vec<InstallEvent>);
+        impl EventSink for Events {
+            fn emit(&mut self, event: InstallEvent) {
+                self.0.push(event);
+            }
+        }
+        for task in [
+            super::InstallTask::Autostart,
+            super::InstallTask::DesktopShortcut,
+            super::InstallTask::StartMenuEntry,
+        ] {
+            let mut operation = operation_with_entries(&[]);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            operation.options.destination = std::env::temp_dir().join(format!(
+                "simp-missing-shortcut-target-{}-{timestamp}",
+                std::process::id()
+            ));
+            assert!(!operation.options.destination.exists());
+            operation.options.main_executable = Some("missing.exe".into());
+            operation.options.autostart = task == super::InstallTask::Autostart;
+            operation.options.desktop_shortcut = task != super::InstallTask::StartMenuEntry;
+            operation.options.start_menu_entry = true;
+            let mut events = Events(Vec::new());
+            assert!(operation.apply_optional_tasks(&mut events).await.is_err());
+            assert_eq!(events.0, vec![InstallEvent::ApplyingTask { task }]);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_shortcut_names_and_path_entries_fail_before_file_installation() {
+        struct IgnoreEvents;
+        impl EventSink for IgnoreEvents {
+            fn emit(&mut self, _: InstallEvent) {}
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let destination = std::env::temp_dir().join(format!(
+            "simp-invalid-tasks-{}-{timestamp};bad",
+            std::process::id()
+        ));
+        let mut operation = operation_with_entries(&["app.exe"]);
+        operation.options.destination = destination.clone();
+        operation.options.add_to_path = Some(PathScope::User);
+        assert!(operation.run(&mut IgnoreEvents).await.is_err());
+        assert!(!destination.exists());
+        operation.options.add_to_path = None;
+        operation.options.main_executable = Some("app.exe".into());
+        operation.options.desktop_shortcut = true;
+        std::sync::Arc::get_mut(&mut operation.manifest)
+            .unwrap()
+            .core_config
+            .name = "../Other App".into();
+        assert!(operation.run(&mut IgnoreEvents).await.is_err());
+        assert!(!destination.exists());
     }
 }

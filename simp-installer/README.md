@@ -45,8 +45,9 @@ On failure, Try again returns to the location page and retains the package and
 license consent. Already written files are not rolled back.
 Cancel and native window closing are blocked while a real installation runs.
 A normal unpackaged `cargo run` launch reports the missing package in the window.
-Runtime task pages are omitted because shortcuts, autostart, and PATH integration
-are not implemented; the summary explains this when those tasks are configured.
+On Windows, runtime task pages offer the configured shortcuts, autostart, and
+PATH integration. Omitted tasks are hidden; `true` and `false` set their initial
+checkbox state. Without a launch target, shortcut and autostart tasks are hidden.
 `core_config.main_executable` identifies a packaged launch target relative to the
 installation folder. `InstallOptions` carries one optional `main_executable`
 path shared by desktop shortcuts, Start Menu entries, and autostart, with boolean
@@ -60,10 +61,10 @@ Omission uses user scope. Fixed policies show no scope selector; `user_choice`
 shows user/system radio options when the PATH task is checked, defaulting to user.
 `InstallOptions.add_to_path` carries the selected `PathScope`, or `None` when
 disabled. The operation rejects a scope forbidden by the package policy before
-writing files. Scope selection is available in the preview; runtime PATH updates
-and UAC elevation remain unimplemented. An elevated process/helper should be
-launched after Install is clicked and before installation changes begin when
-system PATH is requested; cancelling UAC should leave setup ready to retry.
+writing files. System PATH requires launching setup with Run as administrator;
+there is no automatic UAC relaunch/helper yet. Access, value type, and PATH length
+are checked before extracting files. A system PATH directory should not be
+writable by ordinary users. Per-user tasks apply to the account running setup.
 Launch and release-note completion checkboxes are shown only in previews until
 runtime launch actions are implemented.
 Unknown arguments show an error in the window.
@@ -103,10 +104,35 @@ executable size and verify its runtime dependencies on that clean machine.
 
 ## Remaining installation work
 
-Add directory-preserving packaging and parent-directory creation, optional Windows
-tasks, elevation for protected destinations, cancellation, and rollback. The
+Add directory-preserving packaging and parent-directory creation, automatic
+elevation for protected operations, cancellation, and rollback. The
 current operation overwrites existing files and can leave a partial installation
-after failure. Keep GPUI, channels, and thread scheduling in the UI adapter.
+after failure. Keep GPUI and event channels in the UI adapter.
 Headless GUI tests exercise real payload installation, failure/retry, progress,
 and the close guard. Native Windows appearance and accessibility still need the
 manual checks above.
+
+## Windows integration
+
+Desktop, Start Menu, and autostart use native `.lnk` files in the current user's
+Desktop, Programs, and Startup known folders. They point to the installed main
+executable with the installation folder as the working directory. Existing links
+to the same target are preserved; unrelated links are not overwritten.
+
+PATH updates append the installation directory to `HKCU\Environment` for user
+scope, or the Session Manager environment key in `HKLM` for system scope. Existing
+entries, `%VARIABLE%` references, and `REG_SZ`/`REG_EXPAND_SZ` types are preserved.
+Duplicate checks account for case, separators, quotes, and expanded references.
+Directories containing `;`, `%`, or NUL cannot safely be added and are rejected.
+A bounded `WM_SETTINGCHANGE` broadcast notifies other applications. Existing
+processes may keep their old environment; reopen terminals after installation.
+
+`InstallOperation::run` stays async. Blocking Windows calls run via
+`tokio::task::spawn_blocking`; events are emitted on the coordinating task. Task
+errors propagate and prevent a successful `Finished` event. Completed files and
+integration changes are not rolled back on a later failure.
+
+Native tests use temporary shortcut files and uniquely named registry keys under
+`HKCU\Software\SIMP\Tests`, never the real PATH or shortcut folders. A sandbox
+that denies registry writes cannot run those three registry tests without granting
+access; the remaining native tests only read known folders and process elevation.

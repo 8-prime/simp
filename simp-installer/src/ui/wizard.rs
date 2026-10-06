@@ -121,7 +121,9 @@ impl AppDetails {
                     InstallTask::AddToPath,
                     match path_scope_policy {
                         PathScopePolicy::User => "Add application to user PATH",
-                        PathScopePolicy::System => "Add application to system PATH",
+                        PathScopePolicy::System => {
+                            "Add application to system PATH (requires administrator)"
+                        }
                         PathScopePolicy::UserChoice => "Add application to PATH",
                     },
                     config.add_to_path,
