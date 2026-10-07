@@ -1,11 +1,11 @@
-use std::{
-    fs::{self},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 use clap::Parser;
-use simp_core::{Footer, Manifest, SimpConfig};
-use tokio::{fs::File, io::AsyncWriteExt};
+use simp_core::{Footer, SimpConfig, SourceManifest};
+use tokio::{
+    fs::{self, File},
+    io::{AsyncWriteExt, BufWriter},
+};
 
 const INSTALLER_EXE: &[u8] = include_bytes!("../../target/release/simp-installer.exe");
 
@@ -36,7 +36,7 @@ async fn main() -> eyre::Result<()> {
         std::process::exit(1);
     }
 
-    let contents = fs::read_to_string(&args.input)?;
+    let contents = fs::read_to_string(&args.input).await?;
     let config: SimpConfig = serde_json::from_str(&contents)?;
 
     if let Err(e) = config.components_are_valid() {
@@ -66,19 +66,33 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
-    let manifest = Manifest::new(&config).await?;
-    let mut file = File::create(output).await?;
+    let manifest = SourceManifest::new(&config).await?;
+    // Streaming sources must not be truncated by opening the output first.
+    if fs::try_exists(&output).await? {
+        let output_path = fs::canonicalize(&output).await?;
+        for entry in &manifest.entries {
+            if fs::canonicalize(&entry.source_path).await? == output_path {
+                eyre::bail!(
+                    "Installer output would overwrite source file {}",
+                    entry.source_path.display()
+                );
+            }
+        }
+    }
+    let mut file = BufWriter::new(File::create(output).await?);
     file.write_all(INSTALLER_EXE).await?;
-    let encoded: Vec<u8> = manifest.encode();
-    file.write_all(&encoded).await?;
+    let manifest_offset = manifest
+        .encode(&mut file, u64::try_from(INSTALLER_EXE.len())?)
+        .await?;
 
     let footer = Footer {
-        manifest_offset: u64::try_from(INSTALLER_EXE.len())?,
+        manifest_offset,
         version: Footer::FORMAT_VERSION,
     };
 
     let footer_buf: [u8; 14] = footer.into();
     file.write_all(footer_buf.as_ref()).await?;
+    file.flush().await?;
 
     println!("{:?}", INSTALLER_EXE.len());
     Ok(())

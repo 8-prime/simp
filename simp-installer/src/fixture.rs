@@ -1,9 +1,11 @@
 //! Manifest used only by the development UI preview.
 
-use simp_core::{CoreConfig, InstallTarget, Manifest, ManifestEntry, PathScopePolicy};
+use crate::install::InstallerPackage;
+use simp_core::{CoreConfig, InstallTarget, PackageEntry, PackageManifest, PathScopePolicy};
 
-pub fn manifest() -> Manifest {
-    Manifest {
+pub fn manifest() -> InstallerPackage {
+    InstallerPackage { path: std::path::PathBuf::new(), manifest: PackageManifest {
+        payload_offset: 0,
         core_config: CoreConfig {
             name: "Example Application".into(),
             version: "1.0.0".into(),
@@ -19,12 +21,13 @@ pub fn manifest() -> Manifest {
                 r"C:\Program Files\Example Application".into(),
             ),
         },
-        entries: vec![ManifestEntry {
+        entries: vec![PackageEntry {
             name: "example.txt".into(),
-            data: b"Example file for the installer preview.\n".to_vec(),
-        }, ManifestEntry {
+            offset: 0, compressed_size: 0,
+            uncompressed_size: b"Example file for the installer preview.\n".len() as u64,
+        }, PackageEntry {
             name: "example.exe".into(),
-            data: Vec::new(),
+            offset: 0, compressed_size: 0, uncompressed_size: 0,
         }],
-    }
+    } }
 }

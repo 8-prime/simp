@@ -54,8 +54,21 @@ path shared by desktop shortcuts, Start Menu entries, and autostart, with boolea
 selections for each task. Without a launch target those three options are omitted;
 adding the installation folder to PATH does not require a main executable.
 Configured targets are validated when building and reading a package and before
-installation writes files. The manifest change uses package format version 3,
-so rebuild the runtime and CLI together before building new packages.
+installation writes files. Package format version 4 stores each file as an
+independent zstd frame, followed by a bitcode metadata manifest and the footer.
+Manifest entries contain absolute payload offsets and compressed/uncompressed
+sizes; file contents are not serialized into the metadata. Rebuild the runtime
+and CLI together before building new packages; earlier formats are rejected.
+The CLI collects `SourceEntry` paths and streams one source file at a time through
+async zstd compression into its buffered output writer. Runtime loading seeks to
+the footer and reads only the `PackageManifest`. Installation streams each
+compressed range into a destination file, checking frame completion, checksum,
+and uncompressed size before reporting that file as completed. Source and
+extracted files are never buffered in full. I/O buffers are bounded, while
+metadata scales with file count and zstd uses its own working memory. Metadata
+is limited to 64 MiB; payload offsets and sizes remain `u64` and have no such limit.
+Frame corruption is reported during extraction, so a failed installation may
+leave a partial file. The existing lack of rollback is unchanged.
 `core_config.path_scope` accepts `"user"`, `"system"`, or `"user_choice"`.
 Omission uses user scope. Fixed policies show no scope selector; `user_choice`
 shows user/system radio options when the PATH task is checked, defaulting to user.

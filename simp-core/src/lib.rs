@@ -3,6 +3,9 @@ use std::path::{Component, Path, PathBuf};
 use bitcode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
+mod package;
+pub use package::{PackageEntry, PackageManifest};
+
 pub struct Footer {
     pub version: u16,
     pub manifest_offset: u64,
@@ -11,7 +14,7 @@ pub struct Footer {
 impl Footer {
     pub const MAGIC: u32 = 0x73696D70;
     pub const SIZE: usize = 14;
-    pub const FORMAT_VERSION: u16 = 3;
+    pub const FORMAT_VERSION: u16 = 4;
 }
 
 impl From<Footer> for [u8; 14] {
@@ -146,14 +149,15 @@ impl SimpConfig {
     }
 }
 
-#[derive(Encode, Decode, PartialEq, Debug)]
-pub struct ManifestEntry {
+/// A source file to open during packaging; its contents are never stored here.
+#[derive(PartialEq, Debug)]
+pub struct SourceEntry {
     pub name: String,
-    pub data: Vec<u8>,
+    pub source_path: PathBuf,
 }
 
-impl ManifestEntry {
-    pub async fn new(component_path: &PathBuf) -> eyre::Result<Self> {
+impl SourceEntry {
+    pub fn new(component_path: &Path) -> eyre::Result<Self> {
         let Some(file_name) = component_path.file_name() else {
             eyre::bail!("Cannot determine file name for path {:#?}", component_path);
         };
@@ -161,43 +165,33 @@ impl ManifestEntry {
             .to_str()
             .ok_or_else(|| eyre::eyre!("File name is not valid UTF-8"))?
             .to_owned();
-        let bytes: Vec<u8> = tokio::fs::read(&component_path).await?;
-        return Ok(ManifestEntry {
-            name: name,
-            data: bytes,
+        return Ok(SourceEntry {
+            name,
+            source_path: component_path.to_owned(),
         });
     }
 }
 
-#[derive(Encode, Decode, PartialEq, Debug)]
-pub struct Manifest {
+/// Build-time application metadata and source paths, separate from the on-disk manifest.
+#[derive(PartialEq, Debug)]
+pub struct SourceManifest {
     pub core_config: CoreConfig,
-    pub entries: Vec<ManifestEntry>,
+    pub entries: Vec<SourceEntry>,
 }
 
-impl Manifest {
+impl SourceManifest {
     pub async fn new(config: &SimpConfig) -> eyre::Result<Self> {
-        let mut manifest = Manifest {
+        let mut manifest = SourceManifest {
             core_config: config.core_config.clone(),
             entries: vec![],
         };
 
         for comp in config.components.iter() {
-            Manifest::handle_component(comp, &mut manifest).await?;
+            SourceManifest::handle_component(comp, &mut manifest).await?;
         }
 
         manifest.validate_main_executable()?;
         return Ok(manifest);
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        return bitcode::encode(self);
-    }
-
-    pub fn decode(bytes: &[u8]) -> eyre::Result<Self> {
-        let manifest: Self = bitcode::decode(bytes)?;
-        manifest.validate_main_executable()?;
-        Ok(manifest)
     }
 
     pub fn validate_main_executable(&self) -> eyre::Result<()> {
@@ -209,82 +203,77 @@ impl Manifest {
 
     /// Application launch targets must identify exactly one packaged file.
     pub fn validate_file_target(&self, target: &Path) -> eyre::Result<()> {
-        if !target
-            .components()
-            .any(|part| matches!(part, Component::Normal(_)))
-            || target.components().any(|part| {
-                matches!(
-                    part,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            eyre::bail!(
-                "Application target {} must be a relative file path within the installation directory",
-                target.display()
-            );
-        }
-
-        let matches = self
-            .entries
-            .iter()
-            .filter(|entry| Path::new(&entry.name) == target)
-            .count();
-        match matches {
-            1 => Ok(()),
-            0 => eyre::bail!(
-                "Application target {} is not a packaged file",
-                target.display()
-            ),
-            _ => eyre::bail!(
-                "Application target {} matches multiple packaged files",
-                target.display()
-            ),
-        }
+        validate_file_target(target, self.entries.iter().map(|entry| entry.name.as_str()))
     }
 
     async fn handle_component(
         component: &InstallComponent,
-        manifest: &mut Manifest,
+        manifest: &mut SourceManifest,
     ) -> eyre::Result<()> {
         let path = &component.component_path;
-        if path.is_file() {
-            manifest
-                .entries
-                .push(ManifestEntry::new(&component.component_path).await?);
-        } else if path.is_dir() {
-            Manifest::handle_dir_component(&component.component_path, manifest).await?;
+        let kind = tokio::fs::metadata(path).await?;
+        if kind.is_file() {
+            manifest.entries.push(SourceEntry::new(path)?);
+        } else if kind.is_dir() {
+            SourceManifest::handle_dir_component(path, manifest).await?;
         } else {
-            eyre::bail!(
-                "Required component at path {:#?} does not exist",
-                component.component_path
-            );
+            eyre::bail!("Required component at path {path:#?} is not a file or directory");
         }
         Ok(())
     }
 
     async fn handle_dir_component(
-        component_path: &PathBuf,
-        manifest: &mut Manifest,
+        component_path: &Path,
+        manifest: &mut SourceManifest,
     ) -> eyre::Result<()> {
-        let mut pending = vec![component_path.clone()];
-
+        let mut pending = vec![component_path.to_owned()];
         while let Some(dir) = pending.pop() {
             let mut entries = tokio::fs::read_dir(&dir).await?;
-
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
                 let kind = entry.file_type().await?;
-
                 if kind.is_dir() {
                     pending.push(path);
                 } else if kind.is_file() {
-                    manifest.entries.push(ManifestEntry::new(&path).await?);
+                    manifest.entries.push(SourceEntry::new(&path)?);
                 }
             }
         }
-
         Ok(())
+    }
+}
+
+fn validate_file_target<'a>(
+    target: &Path,
+    names: impl Iterator<Item = &'a str>,
+) -> eyre::Result<()> {
+    if !target
+        .components()
+        .any(|part| matches!(part, Component::Normal(_)))
+        || target.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        eyre::bail!(
+            "Application target {} must be a relative file path within the installation directory",
+            target.display()
+        );
+    }
+
+    let matches = names.filter(|name| Path::new(name) == target).count();
+    match matches {
+        1 => Ok(()),
+        0 => eyre::bail!(
+            "Application target {} is not a packaged file",
+            target.display()
+        ),
+        _ => eyre::bail!(
+            "Application target {} matches multiple packaged files",
+            target.display()
+        ),
     }
 }
 
@@ -292,9 +281,25 @@ impl Manifest {
 mod tests {
     use super::*;
 
-    #[test]
-    fn manifest_with_custom_target_round_trips() {
-        let manifest = Manifest {
+    fn source_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/hello-world/payload/hello.cmd")
+    }
+
+    async fn round_trip(manifest: &SourceManifest) -> PackageManifest {
+        let mut bytes = Vec::new();
+        let manifest_offset = manifest.encode(&mut bytes, 0).await.unwrap();
+        bytes.extend(<[u8; Footer::SIZE]>::from(Footer {
+            version: Footer::FORMAT_VERSION,
+            manifest_offset,
+        }));
+        PackageManifest::decode(&mut std::io::Cursor::new(bytes))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn manifest_with_custom_target_round_trips() {
+        let manifest = SourceManifest {
             core_config: CoreConfig {
                 name: "Example".into(),
                 version: "1.0.0".into(),
@@ -308,19 +313,19 @@ mod tests {
                 path_scope: None,
                 target: InstallTarget::Custom("C:/Example".into()),
             },
-            entries: vec![ManifestEntry {
+            entries: vec![SourceEntry {
                 name: "app.exe".into(),
-                data: vec![1, 2, 3],
+                source_path: source_path(),
             }],
         };
 
-        let encoded = manifest.encode();
-        let decoded = Manifest::decode(&encoded).unwrap();
-        assert_eq!(decoded, manifest);
+        let decoded = round_trip(&manifest).await;
+        assert_eq!(decoded.core_config, manifest.core_config);
+        assert_eq!(decoded.entries[0].name, "app.exe");
     }
 
-    fn manifest_with_target(target: Option<&str>) -> Manifest {
-        Manifest {
+    fn manifest_with_target(target: Option<&str>) -> SourceManifest {
+        SourceManifest {
             core_config: CoreConfig {
                 name: "Example".into(),
                 version: "1.0.0".into(),
@@ -336,16 +341,16 @@ mod tests {
             },
             entries: ["helper.exe", "app.exe"]
                 .into_iter()
-                .map(|name| ManifestEntry {
+                .map(|name| SourceEntry {
                     name: name.into(),
-                    data: Vec::new(),
+                    source_path: source_path(),
                 })
                 .collect(),
         }
     }
 
-    #[test]
-    fn main_executable_identifies_a_packaged_file_without_guessing() {
+    #[tokio::test]
+    async fn main_executable_identifies_a_packaged_file_without_guessing() {
         assert!(
             manifest_with_target(Some("app.exe"))
                 .validate_main_executable()
@@ -366,12 +371,14 @@ mod tests {
         ] {
             let manifest = manifest_with_target(Some(target));
             assert!(manifest.validate_main_executable().is_err(), "{target}");
-            assert!(Manifest::decode(&manifest.encode()).is_err(), "{target}");
+            let mut bytes = Vec::new();
+            assert!(manifest.encode(&mut bytes, 0).await.is_err(), "{target}");
+            assert!(bytes.is_empty());
         }
         let mut manifest = manifest_with_target(Some("app.exe"));
-        manifest.entries.push(ManifestEntry {
+        manifest.entries.push(SourceEntry {
             name: "app.exe".into(),
-            data: Vec::new(),
+            source_path: source_path(),
         });
         assert!(manifest.validate_main_executable().is_err());
     }
@@ -399,19 +406,22 @@ mod tests {
         for component in &mut config.components {
             component.component_path = example_directory.join(&component.component_path);
         }
-        let manifest = Manifest::new(&config).await.unwrap();
+        let manifest = SourceManifest::new(&config).await.unwrap();
         assert_eq!(
             manifest.core_config.main_executable.as_deref(),
             Some("hello.cmd")
         );
-        assert_eq!(Manifest::decode(&manifest.encode()).unwrap(), manifest);
+        assert_eq!(
+            round_trip(&manifest).await.core_config,
+            manifest.core_config
+        );
 
         config.core_config.main_executable = Some("missing.exe".into());
-        assert!(Manifest::new(&config).await.is_err());
+        assert!(SourceManifest::new(&config).await.is_err());
     }
 
-    #[test]
-    fn path_scope_policies_parse_from_json_and_survive_packaging() {
+    #[tokio::test]
+    async fn path_scope_policies_parse_from_json_and_survive_packaging() {
         for (json, policy) in [
             ("\"user\"", PathScopePolicy::User),
             ("\"system\"", PathScopePolicy::System),
@@ -423,7 +433,10 @@ mod tests {
             );
             let mut manifest = manifest_with_target(None);
             manifest.core_config.path_scope = Some(policy);
-            assert_eq!(Manifest::decode(&manifest.encode()).unwrap(), manifest);
+            assert_eq!(
+                round_trip(&manifest).await.core_config,
+                manifest.core_config
+            );
         }
         let config: CoreConfig = serde_json::from_str(
             r#"{"name":"Example","version":"1.0","target":"AppData","add_to_path":true}"#,

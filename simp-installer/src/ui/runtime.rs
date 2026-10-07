@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use simp_core::Manifest;
+use crate::install::InstallerPackage;
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 
 use crate::install::operation::{EventSink, InstallEvent, InstallOperation, InstallOptions};
@@ -17,7 +17,7 @@ impl EventSink for UiEvents {
 
 pub(super) fn start(
     runtime: &Handle,
-    manifest: Arc<Manifest>,
+    manifest: Arc<InstallerPackage>,
     options: InstallOptions,
 ) -> (
     mpsc::UnboundedReceiver<InstallEvent>,

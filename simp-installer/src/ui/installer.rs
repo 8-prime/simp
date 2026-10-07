@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use crate::install::InstallerPackage;
 use gpui_kit::base::{Progress, Radio, RadioGroup};
 use gpui_kit::component::{
     Disableable, IconName,
@@ -13,7 +14,7 @@ use gpui_kit::{
     IntoElement, ParentElement, PathPromptOptions, Render, Role, StatefulInteractiveElement,
     Styled, Window, div, px, relative, rgb, transparent_black,
 };
-use simp_core::{Manifest, PathScope, PathScopePolicy};
+use simp_core::{PathScope, PathScopePolicy};
 
 use super::wizard::{AppDetails, InstallerState, Page};
 use crate::args::LaunchMode;
@@ -28,7 +29,7 @@ pub(super) struct InstallerView {
     pub focus: FocusHandle,
     pub state: InstallerState,
     pub details: Option<AppDetails>,
-    manifest: Option<Arc<Manifest>>,
+    manifest: Option<Arc<InstallerPackage>>,
     runtime: tokio::runtime::Handle,
     runtime_task: Option<gpui_kit::Task<()>>,
     unavailable_tasks: bool,
@@ -51,7 +52,7 @@ pub(super) struct InstallerView {
 
 impl InstallerView {
     pub fn new(
-        installer: Result<(LaunchMode, Manifest), String>,
+        installer: Result<(LaunchMode, InstallerPackage), String>,
         runtime: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -63,7 +64,7 @@ impl InstallerView {
             #[cfg(feature = "ui-preview")]
             Ok((LaunchMode::Preview { fail }, manifest)) => {
                 preview_failure = Some(fail);
-                let details = AppDetails::from_manifest(&manifest);
+                let details = AppDetails::from_manifest(&manifest.manifest);
                 (
                     Some(details),
                     Some(manifest),
@@ -71,7 +72,7 @@ impl InstallerView {
                 )
             }
             Ok((LaunchMode::Runtime, manifest)) => {
-                let mut details = AppDetails::from_manifest(&manifest);
+                let mut details = AppDetails::from_manifest(&manifest.manifest);
                 if !cfg!(windows) {
                     unavailable_tasks = !details.tasks.is_empty();
                     details.tasks.clear();
@@ -972,7 +973,10 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{TestAppContext, VisualTestContext, component::Root, size};
-    use simp_core::{CoreConfig, InstallTarget, ManifestEntry};
+    use simp_core::{
+        CoreConfig, Footer, InstallTarget, PackageEntry, PackageManifest, SourceEntry,
+        SourceManifest,
+    };
     use std::{
         fs,
         path::Path,
@@ -981,6 +985,11 @@ mod tests {
     };
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestEntry {
+        name: String,
+        data: Vec<u8>,
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -1011,9 +1020,9 @@ mod tests {
         cx: &mut TestAppContext,
         runtime: &tokio::runtime::Runtime,
         destination: &Path,
-        entries: Vec<ManifestEntry>,
+        entries: Vec<TestEntry>,
     ) -> (Entity<InstallerView>, VisualTestContext) {
-        let manifest = Manifest {
+        let source = SourceManifest {
             core_config: CoreConfig {
                 name: "UI test".into(),
                 version: "1.0".into(),
@@ -1027,16 +1036,44 @@ mod tests {
                 path_scope: None,
                 target: InstallTarget::Custom(destination.display().to_string()),
             },
-            entries,
+            entries: entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let source_path = destination
+                        .parent()
+                        .unwrap()
+                        .join(format!("source-{index}"));
+                    fs::write(&source_path, entry.data).unwrap();
+                    SourceEntry {
+                        name: entry.name,
+                        source_path,
+                    }
+                })
+                .collect(),
         };
-        setup_manifest(cx, runtime, LaunchMode::Runtime, manifest)
+        let package_path = destination.parent().unwrap().join("test-package.bin");
+        let package = runtime.block_on(async {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(&package_path).await.unwrap();
+            let offset = source.encode(&mut file, 0).await.unwrap();
+            file.write_all(&<[u8; Footer::SIZE]>::from(Footer {
+                version: Footer::FORMAT_VERSION,
+                manifest_offset: offset,
+            }))
+            .await
+            .unwrap();
+            file.flush().await.unwrap();
+            crate::install::parse_installer(package_path).await.unwrap()
+        });
+        setup_manifest(cx, runtime, LaunchMode::Runtime, package)
     }
 
     fn setup_manifest(
         cx: &mut TestAppContext,
         runtime: &tokio::runtime::Runtime,
         mode: LaunchMode,
-        manifest: Manifest,
+        manifest: InstallerPackage,
     ) -> (Entity<InstallerView>, VisualTestContext) {
         cx.update(gpui_kit::init);
         let mut installer = None;
@@ -1066,13 +1103,13 @@ mod tests {
         }
     }
 
-    fn payload() -> Vec<ManifestEntry> {
+    fn payload() -> Vec<TestEntry> {
         vec![
-            ManifestEntry {
+            TestEntry {
                 name: "app.txt".into(),
                 data: b"hello".to_vec(),
             },
-            ManifestEntry {
+            TestEntry {
                 name: "data.bin".into(),
                 data: vec![0, 1, 255],
             },
@@ -1087,11 +1124,11 @@ mod tests {
             .build()
             .unwrap();
         let mut manifest = crate::fixture::manifest();
-        manifest.core_config.eula = None;
+        manifest.manifest.core_config.eula = None;
         let (view, mut cx) =
             setup_manifest(cx, &runtime, LaunchMode::Preview { fail: false }, manifest);
         let mut manifest = crate::fixture::manifest();
-        manifest.core_config.eula = None;
+        manifest.manifest.core_config.eula = None;
         let task_index = cx.read(|cx| {
             view.read(cx)
                 .details
@@ -1152,10 +1189,10 @@ mod tests {
                 (PathScopePolicy::User, PathScope::User),
                 (PathScopePolicy::System, PathScope::System),
             ] {
-                manifest.core_config.path_scope = Some(policy);
-                manifest.core_config.add_to_path = Some(true);
+                manifest.manifest.core_config.path_scope = Some(policy);
+                manifest.manifest.core_config.add_to_path = Some(true);
                 view.update(cx, |view, cx| {
-                    view.details = Some(AppDetails::from_manifest(&manifest));
+                    view.details = Some(AppDetails::from_manifest(&manifest.manifest));
                     cx.notify();
                 });
                 window.render_frame(cx);
@@ -1221,24 +1258,30 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let manifest = Manifest {
-            core_config: CoreConfig {
-                name: "UI test".into(),
-                version: "1.0".into(),
-                description: None,
-                eula: None,
-                main_executable: Some("app.exe".into()),
-                auto_start: Some(true),
-                desktop_icon: Some(true),
-                start_menu: Some(true),
-                add_to_path: Some(false),
-                path_scope: Some(PathScopePolicy::UserChoice),
-                target: InstallTarget::Custom(directory.0.display().to_string()),
+        let manifest = InstallerPackage {
+            path: PathBuf::new(),
+            manifest: PackageManifest {
+                payload_offset: 0,
+                core_config: CoreConfig {
+                    name: "UI test".into(),
+                    version: "1.0".into(),
+                    description: None,
+                    eula: None,
+                    main_executable: Some("app.exe".into()),
+                    auto_start: Some(true),
+                    desktop_icon: Some(true),
+                    start_menu: Some(true),
+                    add_to_path: Some(false),
+                    path_scope: Some(PathScopePolicy::UserChoice),
+                    target: InstallTarget::Custom(directory.0.display().to_string()),
+                },
+                entries: vec![PackageEntry {
+                    name: "app.exe".into(),
+                    offset: 0,
+                    compressed_size: 0,
+                    uncompressed_size: 0,
+                }],
             },
-            entries: vec![ManifestEntry {
-                name: "app.exe".into(),
-                data: Vec::new(),
-            }],
         };
         let (view, mut cx) = setup_manifest(cx, &runtime, LaunchMode::Runtime, manifest);
         cx.update(|window, cx| {

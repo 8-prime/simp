@@ -1,6 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use simp_core::Manifest;
+use crate::install::InstallerPackage;
 
 use crate::args::LaunchMode;
 
@@ -25,7 +25,7 @@ async fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn load_manifest(mode: &LaunchMode) -> eyre::Result<Manifest> {
+async fn load_manifest(mode: &LaunchMode) -> eyre::Result<InstallerPackage> {
     match mode {
         LaunchMode::Runtime => install::parse_installer(std::env::current_exe()?).await,
         #[cfg(feature = "ui-preview")]
@@ -40,6 +40,6 @@ async fn preview_loads_manifest_without_a_packaged_executable() {
         .await
         .unwrap();
 
-    assert_eq!(manifest.core_config.name, "Example Application");
-    assert_eq!(manifest.entries[0].name, "example.txt");
+    assert_eq!(manifest.manifest.core_config.name, "Example Application");
+    assert_eq!(manifest.manifest.entries[0].name, "example.txt");
 }

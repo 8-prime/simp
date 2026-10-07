@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use simp_core::{Manifest, PathScope, PathScopePolicy};
+use simp_core::{PackageManifest, PathScope, PathScopePolicy};
 
 use crate::install::operation::{InstallEvent, InstallOptions, InstallTask};
 
@@ -86,7 +86,7 @@ pub(super) struct AppDetails {
 }
 
 impl AppDetails {
-    pub fn from_manifest(manifest: &Manifest) -> Self {
+    pub fn from_manifest(manifest: &PackageManifest) -> Self {
         let config = &manifest.core_config;
         let path_scope_policy = config.path_scope.unwrap_or(PathScopePolicy::User);
         Self {
@@ -99,7 +99,7 @@ impl AppDetails {
             path_scope_policy,
             path_scope: path_scope_policy.initial_scope(),
             required_bytes: manifest.entries.iter().fold(0_u64, |total, entry| {
-                total.saturating_add(entry.data.len() as u64)
+                total.saturating_add(entry.uncompressed_size)
             }),
             tasks: [
                 (
@@ -200,8 +200,9 @@ mod tests {
     use super::*;
     use simp_core::{CoreConfig, InstallTarget};
 
-    fn manifest() -> Manifest {
-        Manifest {
+    fn manifest() -> PackageManifest {
+        PackageManifest {
+            payload_offset: 0,
             core_config: CoreConfig {
                 name: "Example".into(),
                 version: "1.0".into(),
@@ -217,12 +218,25 @@ mod tests {
             },
             entries: ["helper.exe", "app.exe"]
                 .into_iter()
-                .map(|name| simp_core::ManifestEntry {
+                .map(|name| simp_core::PackageEntry {
                     name: name.into(),
-                    data: Vec::new(),
+                    offset: 0,
+                    compressed_size: 0,
+                    uncompressed_size: 0,
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn required_space_uses_u64_metadata_sizes_without_loading_files() {
+        let mut manifest = manifest();
+        manifest.entries[0].uncompressed_size = u64::from(u32::MAX) + 1;
+        manifest.entries[1].uncompressed_size = 123;
+        assert_eq!(
+            AppDetails::from_manifest(&manifest).required_bytes,
+            u64::from(u32::MAX) + 124
+        );
     }
 
     #[test]

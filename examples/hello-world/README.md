@@ -37,9 +37,12 @@ Run the CLI from this example directory because component paths currently resolv
 relative to the working directory. The CLI embeds the release installer when it
 is compiled, so rebuild it after changes to the installer runtime.
 
-`installer.exe` contains the runtime, both payload files, the manifest, and the
-SIMP footer. It can open the setup wizard and read the package. The current runtime
+`installer.exe` contains the runtime, an independent zstd frame for each payload
+file, a metadata manifest, and the SIMP footer (package format version 4).
+It can open the setup wizard and read the package. The current runtime
 UI installs the payload into the selected folder when Install is clicked.
+Building streams files from their source paths; the wizard loads only package
+metadata and installation streams decompressed files directly to disk.
 Optional Windows integration tasks are omitted from this example.
 
 The generated executable is ignored by Git and can be rebuilt with the commands

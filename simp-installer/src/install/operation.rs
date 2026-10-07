@@ -5,12 +5,13 @@ use std::{
 };
 
 use eyre::WrapErr;
-use simp_core::{Manifest, ManifestEntry, PathScope, PathScopePolicy};
+use simp_core::{PackageEntry, PathScope, PathScopePolicy};
 use tokio::{
     fs::{File, create_dir_all},
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, BufWriter},
 };
 
+use super::InstallerPackage;
 use crate::platform::{self, ShortcutLocation};
 
 /// Progress reported by the installation operation, independent of the UI.
@@ -56,26 +57,26 @@ pub trait EventSink {
 
 /// Asynchronous installation work, independent of the UI event loop.
 pub struct InstallOperation {
-    manifest: Arc<Manifest>,
+    package: Arc<InstallerPackage>,
     options: InstallOptions,
 }
 
 impl InstallOperation {
-    pub fn new(manifest: impl Into<Arc<Manifest>>, options: InstallOptions) -> Self {
+    pub fn new(package: impl Into<Arc<InstallerPackage>>, options: InstallOptions) -> Self {
         Self {
-            manifest: manifest.into(),
+            package: package.into(),
             options,
         }
     }
 
     pub async fn run(&self, events: &mut (impl EventSink + ?Sized)) -> eyre::Result<()> {
         events.emit(InstallEvent::Started {
-            total_files: self.manifest.entries.len() as u64,
+            total_files: self.package.manifest.entries.len() as u64,
         });
         self.validate_entries()?;
-        self.manifest.validate_main_executable()?;
+        self.package.manifest.validate_main_executable()?;
         if let Some(target) = &self.options.main_executable {
-            self.manifest.validate_file_target(target)?;
+            self.package.manifest.validate_file_target(target)?;
         } else if self.options.desktop_shortcut
             || self.options.start_menu_entry
             || self.options.autostart
@@ -86,6 +87,7 @@ impl InstallOperation {
         }
         if let Some(scope) = self.options.add_to_path {
             let policy = self
+                .package
                 .manifest
                 .core_config
                 .path_scope
@@ -106,7 +108,7 @@ impl InstallOperation {
 
     fn validate_entries(&self) -> eyre::Result<()> {
         let mut entries_set: HashSet<&String> = HashSet::new();
-        for entry in self.manifest.entries.iter() {
+        for entry in self.package.manifest.entries.iter() {
             if entry.name.is_empty() {
                 eyre::bail!("File name in manifest cannot be empty")
             }
@@ -148,11 +150,14 @@ impl InstallOperation {
     }
 
     async fn install_files(&self, events: &mut (impl EventSink + ?Sized)) -> eyre::Result<()> {
-        let total = self.manifest.entries.len() as u64;
+        let total = self.package.manifest.entries.len() as u64;
+        let mut source = File::open(&self.package.path)
+            .await
+            .wrap_err("Failed to open installer payload source")?;
         let mut completed: u64 = 0;
-        for entry in self.manifest.entries.iter() {
+        for entry in self.package.manifest.entries.iter() {
             let target_path = self.options.destination.join(&entry.name);
-            self.write_entry(&entry, &target_path).await?;
+            self.write_entry(&mut source, entry, &target_path).await?;
             completed += 1;
             events.emit(InstallEvent::InstallingFile {
                 path: target_path,
@@ -163,9 +168,22 @@ impl InstallOperation {
         return Ok(());
     }
 
-    async fn write_entry(&self, entry: &ManifestEntry, path: &Path) -> eyre::Result<()> {
-        let mut file = File::create(path).await?;
-        file.write_all(&entry.data).await?;
+    async fn write_entry(
+        &self,
+        source: &mut File,
+        entry: &PackageEntry,
+        path: &Path,
+    ) -> eyre::Result<()> {
+        if tokio::fs::try_exists(path).await?
+            && tokio::fs::canonicalize(path).await? == self.package.path
+        {
+            eyre::bail!("Installation would overwrite its own payload source");
+        }
+        let mut file = BufWriter::new(File::create(path).await?);
+        entry
+            .extract(source, &mut file)
+            .await
+            .wrap_err_with(|| format!("Failed to extract {}", entry.name))?;
         file.flush().await?;
         return Ok(());
     }
@@ -173,7 +191,7 @@ impl InstallOperation {
     async fn prepare_optional_tasks(&self) -> eyre::Result<()> {
         if self.options.desktop_shortcut || self.options.start_menu_entry || self.options.autostart
         {
-            platform::validate_shortcut_name(&self.manifest.core_config.name)?;
+            platform::validate_shortcut_name(&self.package.manifest.core_config.name)?;
             if !self.options.destination.is_absolute() {
                 eyre::bail!("Shortcut installation directory must be an absolute path");
             }
@@ -266,7 +284,7 @@ impl InstallOperation {
         events: &mut (impl EventSink + ?Sized),
     ) -> eyre::Result<()> {
         events.emit(InstallEvent::ApplyingTask { task });
-        let name = self.manifest.core_config.name.clone();
+        let name = self.package.manifest.core_config.name.clone();
         let target = self.options.destination.join(exe_path);
         let directory = self.options.destination.clone();
         tokio::task::spawn_blocking(move || {
@@ -297,33 +315,39 @@ impl InstallOperation {
 mod tests {
     use super::{EventSink, InstallEvent, InstallOperation, InstallOptions};
     use simp_core::{
-        CoreConfig, InstallTarget, Manifest, ManifestEntry, PathScope, PathScopePolicy,
+        CoreConfig, InstallTarget, PackageEntry, PackageManifest, PathScope, PathScopePolicy,
     };
     use std::path::Path;
 
     fn operation_with_entries(names: &[&str]) -> InstallOperation {
         InstallOperation::new(
-            Manifest {
-                core_config: CoreConfig {
-                    name: "Example".into(),
-                    version: "1.0".into(),
-                    description: None,
-                    eula: None,
-                    main_executable: None,
-                    auto_start: None,
-                    desktop_icon: None,
-                    start_menu: None,
-                    add_to_path: None,
-                    path_scope: None,
-                    target: InstallTarget::ProgramFiles,
+            super::InstallerPackage {
+                path: "unused-package.exe".into(),
+                manifest: PackageManifest {
+                    payload_offset: 0,
+                    core_config: CoreConfig {
+                        name: "Example".into(),
+                        version: "1.0".into(),
+                        description: None,
+                        eula: None,
+                        main_executable: None,
+                        auto_start: None,
+                        desktop_icon: None,
+                        start_menu: None,
+                        add_to_path: None,
+                        path_scope: None,
+                        target: InstallTarget::ProgramFiles,
+                    },
+                    entries: names
+                        .iter()
+                        .map(|name| PackageEntry {
+                            name: (*name).into(),
+                            offset: 0,
+                            compressed_size: 0,
+                            uncompressed_size: 0,
+                        })
+                        .collect(),
                 },
-                entries: names
-                    .iter()
-                    .map(|name| ManifestEntry {
-                        name: (*name).into(),
-                        data: Vec::new(),
-                    })
-                    .collect(),
             },
             InstallOptions {
                 destination: "install".into(),
@@ -334,6 +358,202 @@ mod tests {
                 add_to_path: None,
             },
         )
+    }
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "simp-stream-install-test-{}-{timestamp}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            if self.0.parent() == Some(std::env::temp_dir().as_path())
+                && self.0.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with("simp-stream-install-test-")
+                })
+            {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    async fn package_with_files(directory: &TestDirectory) -> super::InstallerPackage {
+        use tokio::io::AsyncWriteExt;
+        let source_directory = directory.0.join("sources");
+        tokio::fs::create_dir(&source_directory).await.unwrap();
+        tokio::fs::write(source_directory.join("empty.txt"), [])
+            .await
+            .unwrap();
+        tokio::fs::write(source_directory.join("app.cmd"), b"echo hello\r\n")
+            .await
+            .unwrap();
+        let mut data = tokio::fs::File::create(source_directory.join("data.bin"))
+            .await
+            .unwrap();
+        let block = vec![42u8; 64 * 1024];
+        for _ in 0..16 {
+            data.write_all(&block).await.unwrap();
+        }
+        data.flush().await.unwrap();
+        drop(data);
+        let source = simp_core::SourceManifest {
+            core_config: operation_with_entries(&[])
+                .package
+                .manifest
+                .core_config
+                .clone(),
+            entries: ["empty.txt", "data.bin", "app.cmd"]
+                .into_iter()
+                .map(|name| simp_core::SourceEntry::new(&source_directory.join(name)).unwrap())
+                .collect(),
+        };
+        let path = directory.0.join("package.bin");
+        let mut output = tokio::fs::File::create(&path).await.unwrap();
+        output.write_all(b"fake bootstrap").await.unwrap();
+        let manifest_offset = source
+            .encode(&mut output, b"fake bootstrap".len() as u64)
+            .await
+            .unwrap();
+        output
+            .write_all(&<[u8; simp_core::Footer::SIZE]>::from(simp_core::Footer {
+                version: simp_core::Footer::FORMAT_VERSION,
+                manifest_offset,
+            }))
+            .await
+            .unwrap();
+        output.flush().await.unwrap();
+        drop(output);
+        crate::install::parse_installer(path).await.unwrap()
+    }
+
+    struct RecordedEvents(Vec<InstallEvent>);
+    impl EventSink for RecordedEvents {
+        fn emit(&mut self, event: InstallEvent) {
+            self.0.push(event);
+        }
+    }
+
+    fn operation_for_package(
+        package: super::InstallerPackage,
+        destination: std::path::PathBuf,
+    ) -> InstallOperation {
+        let mut options = operation_with_entries(&[]).options;
+        options.destination = destination;
+        InstallOperation::new(package, options)
+    }
+
+    #[tokio::test]
+    async fn streams_package_files_to_disk_and_reports_completed_files() {
+        let directory = TestDirectory::new();
+        let package = package_with_files(&directory).await;
+        let destination = directory.0.join("installed");
+        let mut events = RecordedEvents(Vec::new());
+        operation_for_package(package, destination.clone())
+            .run(&mut events)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::metadata(destination.join("empty.txt"))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            tokio::fs::read(destination.join("app.cmd")).await.unwrap(),
+            b"echo hello\r\n"
+        );
+        let data = tokio::fs::read(destination.join("data.bin")).await.unwrap();
+        assert_eq!(data.len(), 1024 * 1024);
+        assert!(data.iter().all(|byte| *byte == 42));
+        assert_eq!(
+            events.0.first(),
+            Some(&InstallEvent::Started { total_files: 3 })
+        );
+        assert_eq!(events.0.last(), Some(&InstallEvent::Finished));
+        let completed: Vec<_> = events
+            .0
+            .iter()
+            .filter_map(|event| match event {
+                InstallEvent::InstallingFile {
+                    completed, total, ..
+                } => Some((*completed, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed, [(1, 3), (2, 3), (3, 3)]);
+    }
+
+    #[tokio::test]
+    async fn corrupted_payload_stops_installation_before_reporting_file_success() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+        let directory = TestDirectory::new();
+        let package = package_with_files(&directory).await;
+        let entry = &package.manifest.entries[0];
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&package.path)
+            .await
+            .unwrap();
+        file.seek(SeekFrom::Start(entry.offset + entry.compressed_size - 1))
+            .await
+            .unwrap();
+        let mut checksum = [0u8; 1];
+        file.read_exact(&mut checksum).await.unwrap();
+        checksum[0] ^= 1;
+        file.seek(SeekFrom::Start(entry.offset + entry.compressed_size - 1))
+            .await
+            .unwrap();
+        file.write_all(&checksum).await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+        let destination = directory.0.join("installed");
+        let mut events = RecordedEvents(Vec::new());
+        assert!(
+            operation_for_package(package, destination.clone())
+                .run(&mut events)
+                .await
+                .is_err()
+        );
+        assert_eq!(events.0, [InstallEvent::Started { total_files: 3 }]);
+        assert!(!destination.join("data.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_installation_overwriting_its_payload_source() {
+        let directory = TestDirectory::new();
+        let mut package = package_with_files(&directory).await;
+        let collision = directory.0.join("empty.txt");
+        tokio::fs::rename(&package.path, &collision).await.unwrap();
+        package.path = tokio::fs::canonicalize(collision).await.unwrap();
+        let before = tokio::fs::read(&package.path).await.unwrap();
+        let source_path = package.path.clone();
+        let mut events = RecordedEvents(Vec::new());
+        let error = operation_for_package(package, directory.0.clone())
+            .run(&mut events)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("overwrite its own payload source")
+        );
+        assert_eq!(tokio::fs::read(source_path).await.unwrap(), before);
+        assert_eq!(events.0, [InstallEvent::Started { total_files: 3 }]);
     }
 
     #[test]
@@ -407,8 +627,9 @@ mod tests {
             (Some(PathScopePolicy::System), PathScope::User),
         ] {
             let mut operation = operation_with_entries(&[]);
-            std::sync::Arc::get_mut(&mut operation.manifest)
+            std::sync::Arc::get_mut(&mut operation.package)
                 .unwrap()
+                .manifest
                 .core_config
                 .path_scope = policy;
             operation.options.destination = destination.clone();
@@ -492,8 +713,9 @@ mod tests {
         operation.options.add_to_path = None;
         operation.options.main_executable = Some("app.exe".into());
         operation.options.desktop_shortcut = true;
-        std::sync::Arc::get_mut(&mut operation.manifest)
+        std::sync::Arc::get_mut(&mut operation.package)
             .unwrap()
+            .manifest
             .core_config
             .name = "../Other App".into();
         assert!(operation.run(&mut IgnoreEvents).await.is_err());

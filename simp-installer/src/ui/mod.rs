@@ -4,18 +4,18 @@ mod preview;
 mod runtime;
 mod wizard;
 
+use crate::install::InstallerPackage;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, rgb, size};
-use simp_core::Manifest;
 
 use crate::args::LaunchMode;
 use installer::InstallerView;
 
-pub fn run(installer: Result<(LaunchMode, Manifest), String>) {
+pub fn run(installer: Result<(LaunchMode, InstallerPackage), String>) {
     let runtime = tokio::runtime::Handle::current();
     let title = installer
         .as_ref()
-        .map(|(_, manifest)| format!("{} Setup", manifest.core_config.name))
+        .map(|(_, package)| format!("{} Setup", package.manifest.core_config.name))
         .unwrap_or_else(|_| "Application Setup".into());
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
